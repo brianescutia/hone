@@ -1,0 +1,100 @@
+@import 'leaflet/dist/leaflet.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-white text-ink-900 font-sans antialiased;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply text-ink-900;
+  }
+}
+
+@layer components {
+  .wordmark {
+    @apply font-pixel text-3xl leading-none tracking-wide select-none;
+  }
+  .section-cap {
+    @apply font-pixel text-xl uppercase tracking-wider text-ink-900;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-chip px-3 py-1 text-xs font-medium
+           bg-ink-100 text-ink-700 shadow-chip;
+  }
+  .chip-sky {
+    @apply chip bg-sky-200 text-ink-900;
+  }
+  .chip-sage {
+    @apply chip bg-sage-200 text-ink-900;
+  }
+  .filter-pill {
+    @apply rounded-chip px-4 py-1.5 text-sm font-medium border border-transparent
+           bg-ink-100 text-ink-700 hover:bg-ink-100/80 transition;
+  }
+  .filter-pill-active {
+    @apply rounded-chip px-4 py-1.5 text-sm font-medium border border-sky-300
+           bg-sky-200 text-ink-900 transition;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center rounded-full px-4 py-2
+           text-sm font-medium transition focus:outline-none focus:ring-2
+           focus:ring-sage-300 focus:ring-offset-2;
+  }
+  .btn-primary {
+    @apply btn bg-sage-300 text-ink-900 hover:bg-sage-400;
+  }
+  .btn-sky {
+    @apply btn bg-sky-200 text-ink-900 hover:bg-sky-300;
+  }
+  .btn-ghost {
+    @apply btn bg-white border border-ink-100 hover:bg-ink-100;
+  }
+  .card {
+    @apply bg-white rounded-2xl shadow-soft border border-ink-100;
+  }
+  .input {
+    @apply w-full rounded-full border border-ink-100 bg-white px-4 py-2.5 text-sm
+           placeholder:text-ink-300 focus:border-sage-400 focus:outline-none
+           focus:ring-2 focus:ring-sage-200;
+  }
+  .label {
+    @apply text-xs font-medium text-ink-700 mb-1 block;
+  }
+}
+
+/* Make the Leaflet attribution less obtrusive */
+.leaflet-control-attribution {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* Leaflet's default panes use z-index up to 700 (popups). Clamp them
+   so any UI inside the app (filter dropdowns, modals, toasts) can sit above
+   the map by using z-index >= 1000. */
+.leaflet-pane,
+.leaflet-top,
+.leaflet-bottom {
+  z-index: auto !important;
+}
+.leaflet-tile-pane { z-index: 200 !important; }
+.leaflet-overlay-pane { z-index: 400 !important; }
+.leaflet-shadow-pane { z-index: 500 !important; }
+.leaflet-marker-pane { z-index: 600 !important; }
+.leaflet-tooltip-pane { z-index: 650 !important; }
+.leaflet-popup-pane { z-index: 700 !important; }
+.leaflet-control { z-index: 800 !important; }
+
+/* Hide native scrollbars on the mobile filter-pill row */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
