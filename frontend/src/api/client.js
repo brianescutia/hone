@@ -1,4 +1,15 @@
-const BASE = import.meta.env.VITE_API_BASE || '/api';
+// Resolve the API base URL from env, supporting both the original name
+// (VITE_API_BASE) and the name used in the latest deploy spec
+// (VITE_API_BASE_URL). Falls back to '/api' which works with the Vercel
+// rewrite to Railway, and locally with the Vite dev proxy.
+const RAW_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_BASE ||
+  '/api';
+
+// Strip a trailing slash so paths like `${BASE}/auth/login` don't end up
+// with `//auth/login`.
+const BASE = String(RAW_BASE).replace(/\/$/, '');
 
 function getToken() {
   return localStorage.getItem('hone_token');
@@ -33,6 +44,7 @@ async function request(path, { method = 'GET', body, headers = {} } = {}) {
   if (!res.ok) {
     const err = new Error(data?.error || `Request failed: ${res.status}`);
     err.status = res.status;
+    err.body = data;
     throw err;
   }
   return data;

@@ -7,7 +7,6 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // On mount, hydrate from existing token
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -37,10 +36,18 @@ export function AuthProvider({ children }) {
   }, []);
 
   const register = useCallback(async (payload) => {
-    const { token, user } = await api.post('/auth/register', payload);
-    setToken(token);
-    setUser(user);
-    return user;
+    const data = await api.post('/auth/register', payload);
+    setToken(data.token);
+    setUser(data.user);
+    return data;
+  }, []);
+
+  // Exchange a Google ID token for our app JWT + user.
+  const loginWithGoogle = useCallback(async (credential) => {
+    const data = await api.post('/auth/google', { credential });
+    setToken(data.token);
+    setUser(data.user);
+    return data; // { token, user, googleVerification, hostedDomain }
   }, []);
 
   const logout = useCallback(() => {
@@ -58,7 +65,9 @@ export function AuthProvider({ children }) {
   }, [logout]);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, refresh, setUser }}>
+    <AuthContext.Provider
+      value={{ user, loading, login, register, loginWithGoogle, logout, refresh, setUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

@@ -14,55 +14,77 @@ function ensureSafeConfig() {
       );
       process.exit(1);
     }
-    // Dev fallback: warn but generate an ephemeral secret so the dev server runs.
     process.env.JWT_SECRET =
       process.env.JWT_SECRET ||
       require('crypto').randomBytes(48).toString('hex');
     console.warn(
-      '[warn] JWT_SECRET was missing or too short. Using an ephemeral dev secret. ' +
-        'Set a real one in backend/.env before going to production.'
+      '[warn] JWT_SECRET was missing or too short. Using an ephemeral dev secret.'
     );
   }
 
-  // In production we also require an explicit MONGO_URI — the in-memory
-  // database is for local demos only and shouldn't silently power prod.
   if (process.env.NODE_ENV === 'production' && !process.env.MONGO_URI) {
     console.error(
       '[fatal] MONGO_URI must be set in production. Refusing to fall back to in-memory MongoDB.'
     );
     process.exit(1);
   }
+
+  if (process.env.NODE_ENV === 'production' && !process.env.GOOGLE_CLIENT_ID) {
+    // Not fatal — admin/manager email/password still works — but warn loudly.
+    console.warn(
+      '[warn] GOOGLE_CLIENT_ID is not set. Google sign-in (student verification) will be disabled.'
+    );
+  }
 }
 
 function parseAllowedOrigins() {
-  // Comma-separated list, e.g. "https://hone.app,https://hone-staging.vercel.app"
+  // Comma-separated list. Supports both CLIENT_ORIGINS (preferred) and the
+  // legacy CLIENT_ORIGIN singular env var that the prompt references.
   const raw =
     process.env.CLIENT_ORIGINS ||
     process.env.CLIENT_ORIGIN ||
     'http://localhost:5173';
-  return raw
+  const list = raw
     .split(',')
-    .map((s) => s.trim())
+    .map((s) => s.trim().replace(/\/$/, '')) // strip trailing slashes
     .filter(Boolean);
+  // In development, always allow common local dev origins as a safety net.
+  if (process.env.NODE_ENV !== 'production') {
+    for (const o of ['http://localhost:5173', 'http://127.0.0.1:5173']) {
+      if (!list.includes(o)) list.push(o);
+    }
+  }
+  return list;
 }
 
 function corsOptions() {
   const allowed = parseAllowedOrigins();
   return {
     origin(origin, cb) {
-      // Allow non-browser tools (curl, mobile) and same-origin (no Origin header).
+      // No Origin header (curl, same-origin, server-to-server) → allow.
       if (!origin) return cb(null, true);
-      if (allowed.includes(origin)) return cb(null, true);
-      // Allow any *.vercel.app preview if explicitly opted in.
-      if (
-        process.env.ALLOW_VERCEL_PREVIEWS === 'true' &&
-        /\.vercel\.app$/.test(new URL(origin).hostname)
-      ) {
-        return cb(null, true);
+      const normalized = origin.replace(/\/$/, '');
+      if (allowed.includes(normalized)) return cb(null, true);
+
+      if (process.env.ALLOW_VERCEL_PREVIEWS === 'true') {
+        try {
+          if (/\.vercel\.app$/.test(new URL(origin).hostname)) {
+            return cb(null, true);
+          }
+        } catch (_e) {
+          /* fall through */
+        }
       }
-      return cb(new Error(`CORS: origin ${origin} not allowed`));
+      // Return a non-Error denial so we don't crash the request — express will
+      // simply omit the CORS headers and the browser blocks it client-side.
+      // (Throwing here historically produced 500s in logs that looked scary.)
+      console.warn(`[cors] denied origin ${origin}`);
+      return cb(null, false);
     },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    maxAge: 86400,
   };
 }
 
@@ -70,31 +92,37 @@ async function start() {
   ensureSafeConfig();
   await connectDB();
 
-  // Auto-seed when running on an in-memory DB so the app is usable out of the box.
+  // Auto-seed in-memory DB for local dev.
+  // In production with MONGO_URI set, seeding is gated by SEED_DEMO_DATA=true
+  // so prod databases don't accidentally get demo accounts.
   if (!process.env.MONGO_URI) {
+    const { seedDatabase } = require('./seedData');
+    await seedDatabase();
+  } else if (process.env.SEED_DEMO_DATA === 'true') {
+    console.warn(
+      '[seed] SEED_DEMO_DATA=true — seeding production-style DB with demo data. ' +
+        'Turn this OFF before public launch.'
+    );
     const { seedDatabase } = require('./seedData');
     await seedDatabase();
   }
 
   const app = express();
 
-  // Security headers. We disable CSP because the frontend is served from a
-  // separate origin (Vercel) and the API only returns JSON — there's no HTML
-  // to protect here. crossOriginResourcePolicy='cross-origin' keeps the API
-  // reachable from the frontend domain.
   app.use(
     helmet({
       contentSecurityPolicy: false,
       crossOriginResourcePolicy: { policy: 'cross-origin' },
     })
   );
-  app.use(cors(corsOptions()));
-  // Body limit: 1mb is plenty for JSON; bigger payloads should go through
-  // an object storage upload, not the API.
-  app.use(express.json({ limit: '1mb' }));
 
-  // Trust the proxy hop (Render/Railway/Fly all sit behind one) so
-  // express-rate-limit can see the real client IP.
+  const corsMw = cors(corsOptions());
+  app.use(corsMw);
+  // Explicit preflight handler so OPTIONS requests always get a clean
+  // response with the right CORS headers, regardless of routing.
+  app.options('*', corsMw);
+
+  app.use(express.json({ limit: '1mb' }));
   app.set('trust proxy', 1);
 
   app.get('/api/health', (_req, res) => res.json({ ok: true }));
@@ -115,8 +143,13 @@ async function start() {
   const port = process.env.PORT || 5050;
   const server = app.listen(port, () => {
     const addr = server.address();
+    const allowed = parseAllowedOrigins();
     console.log(`[server] hone API listening on port ${addr.port}`);
-    console.log(`[server] CORS allowed origins: ${parseAllowedOrigins().join(', ')}`);
+    // Safe to log — these are the values the operator put in env vars, not credentials.
+    console.log(`[server] CORS allowed origins: ${allowed.join(', ')}`);
+    console.log(
+      `[server] Google sign-in: ${process.env.GOOGLE_CLIENT_ID ? 'enabled' : 'DISABLED'}`
+    );
   });
 
   return server;

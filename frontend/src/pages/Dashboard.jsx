@@ -5,16 +5,15 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 import { UserBadge, ListingBadge } from '../components/Badges.jsx';
 import { ListingImage } from '../components/ImagePreviewInput.jsx';
+import GoogleSignInButton from '../components/GoogleSignInButton.jsx';
 
 export default function DashboardPage() {
-  const { user, refresh, logout } = useAuth();
+  const { user, loginWithGoogle, logout, refresh } = useAuth();
   const { toast, confirm } = useToast();
   const navigate = useNavigate();
   const [saved, setSaved] = useState([]);
   const [mySubleases, setMySubleases] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [resending, setResending] = useState(false);
-  const [devLink, setDevLink] = useState(null);
 
   useEffect(() => {
     Promise.all([api.get('/users/me/saved'), api.get('/subleases/mine')])
@@ -43,18 +42,25 @@ export default function DashboardPage() {
     }
   }
 
-  async function resendVerification() {
-    setResending(true);
+  async function handleGoogleUpgrade(credential) {
     try {
-      const data = await api.post('/auth/resend-verification');
-      if (data.devVerifyUrl) setDevLink(data.devVerifyUrl);
-      toast.success('Verification link sent to your email.');
+      const { user: updated, googleVerification } = await loginWithGoogle(credential);
+      await refresh();
+      if (googleVerification === 'verified') {
+        toast.success(`Verified as UC Davis student. Welcome, ${updated.name.split(' ')[0]}.`);
+      } else {
+        toast.info(
+          "Signed in, but that Google account isn't @ucdavis.edu. You can browse, but posting and verified reviews stay locked.",
+          { duration: 8000 }
+        );
+      }
     } catch (err) {
       toast.error(err.message);
-    } finally {
-      setResending(false);
     }
   }
+
+  const isStudent = user.role === 'student';
+  const needsVerification = isStudent && !user.studentVerified;
 
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-8">
@@ -65,42 +71,38 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Verification nudge */}
-      {!user.emailVerified && (
+      {/* Verification nudge — Google */}
+      {needsVerification && (
         <div className="card p-4 border-amber-200 bg-amber-50">
           <p className="text-sm">
-            <strong>Verify your email to unlock posting, reviews, and messages.</strong>{' '}
-            Check your inbox for the verification link.
+            <strong>Become a verified UC Davis student.</strong> Sign in with
+            Google using your <code>@ucdavis.edu</code> account to unlock
+            posting subleases, leaving verified reviews, saving listings, and
+            messaging.
           </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button onClick={resendVerification} disabled={resending} className="btn-primary text-xs">
-              {resending ? 'Sending…' : 'Resend verification link'}
-            </button>
-            <Link to="/verify-email" className="btn-ghost text-xs">
-              I have a link
-            </Link>
+          <div className="mt-3">
+            <GoogleSignInButton
+              text="continue_with"
+              onCredential={handleGoogleUpgrade}
+              onError={(e) => toast.error(e.message)}
+            />
           </div>
-          {devLink && (
-            <div className="mt-3 p-2 bg-white rounded-lg border border-cream-300 text-xs">
-              <span className="font-medium">Dev link: </span>
-              <a href={devLink} className="underline text-sage-700 break-all">
-                {devLink}
-              </a>
-            </div>
-          )}
         </div>
       )}
 
-      {user.emailVerified && !user.studentVerified && user.role === 'student' && (
-        <div className="card p-4 border-cream-300 bg-cream-50">
-          <p className="text-sm">
-            <strong>Your email is verified, but it isn't a UC Davis address.</strong>{' '}
-            You can browse listings, but posting, reviewing, and messaging are
-            limited to verified UC Davis students. Sign up again with an{' '}
-            <code>@ucdavis.edu</code> email if you have one.
-          </p>
-        </div>
-      )}
+      {isStudent &&
+        user.emailVerified &&
+        !user.studentVerified &&
+        user.verificationStatus === 'not_ucdavis' && (
+          <div className="card p-4 border-cream-300 bg-cream-50">
+            <p className="text-sm">
+              <strong>You're signed in, but this is not a UC Davis Google account.</strong>{' '}
+              You can browse listings, but you need a UC Davis account to post
+              subleases or leave verified reviews. Sign out and sign back in
+              with your <code>@ucdavis.edu</code> Google account if you have one.
+            </p>
+          </div>
+        )}
 
       {loading && <p className="text-ink-500">Loading…</p>}
 
@@ -147,7 +149,7 @@ export default function DashboardPage() {
             subtitle={
               user.studentVerified
                 ? 'Post your first sublease — it goes live after a quick admin check.'
-                : 'Verify your UC Davis email to post a sublease.'
+                : 'Verify with Google using your UC Davis account to post a sublease.'
             }
           />
         ) : (
@@ -188,19 +190,19 @@ export default function DashboardPage() {
           <div><strong>Name:</strong> {user.name}</div>
           <div><strong>Email:</strong> {user.email}</div>
           <div><strong>Role:</strong> {user.role}</div>
+          <div><strong>Sign-in method:</strong> {user.authProvider || 'local'}</div>
           <div><strong>Status:</strong> <UserBadge user={user} /></div>
         </div>
       </section>
 
-      {/* Danger zone — fulfills the deletion right promised in /privacy */}
+      {/* Danger zone */}
       <section>
         <h2 className="section-cap mb-3 text-red-700">Danger zone</h2>
         <div className="card p-4 border-red-200">
           <p className="text-sm text-ink-700">
             Delete your hone account. This will hard-delete your profile,
             subleases you posted, reports you filed, and conversations.
-            Reviews you've left will be anonymized (still visible, no name
-            attached). This action cannot be undone.
+            Reviews you've left will be anonymized.
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
@@ -231,7 +233,7 @@ export default function DashboardPage() {
                 const ok = await confirm({
                   title: 'Delete account AND wipe reviews?',
                   message:
-                    'This deletes everything above PLUS your reviews. Other students will lose your reviews of their potential apartments. Continue?',
+                    'This deletes everything above PLUS your reviews. Continue?',
                   confirmLabel: 'Delete everything',
                   destructive: true,
                 });

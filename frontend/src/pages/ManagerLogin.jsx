@@ -3,11 +3,15 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
 
+const SHOW_DEMO =
+  import.meta.env.DEV ||
+  import.meta.env.VITE_SHOW_DEMO_CREDENTIALS === 'true';
+
 export default function ManagerLoginPage() {
   const { login, register } = useAuth();
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
+  const [mode, setMode] = useState('signin');
   const [form, setForm] = useState({ name: '', email: '', password: '', company: '' });
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -84,16 +88,6 @@ export default function ManagerLoginPage() {
             minLength={6}
           />
 
-          <div className="flex items-center justify-between text-xs text-ink-700">
-            <label className="flex items-center gap-2">
-              <input type="checkbox" />
-              Remember me
-            </label>
-            <a className="hover:underline" href="#">
-              Forgot password?
-            </a>
-          </div>
-
           {error && <p className="text-sm text-red-600">{error}</p>}
 
           <button disabled={submitting} className="btn-sky w-full text-base py-3">
@@ -119,9 +113,11 @@ export default function ManagerLoginPage() {
           </p>
         </div>
 
-        <div className="mt-4 p-3 bg-white/60 rounded-xl text-xs text-ink-700">
-          <strong>Demo:</strong> manager@almondwood.com / password123
-        </div>
+        {SHOW_DEMO && (
+          <div className="mt-4 p-3 bg-white/60 rounded-xl text-xs text-ink-700">
+            <strong>Demo (dev only):</strong> manager@almondwood.com / password123
+          </div>
+        )}
       </div>
     </div>
   );

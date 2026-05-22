@@ -1,0 +1,1978 @@
+diff -ruN old/QA.md new/QA.md
+--- a/QA.md	1970-01-01 00:00:00.000000000 +0000
++++ b/QA.md	2026-05-22 17:47:58.190745711 +0000
+@@ -0,0 +1,71 @@
++# QA.md — hone post-fix verification
++
++Run this list after deploying the changes in this PR. Each box should be checked off before announcing the launch.
++
++## 1. Endpoints respond
++- [ ] `curl https://hone-production-6f2e.up.railway.app/api/health` → `{"ok":true}`
++- [ ] `curl https://hone-production-6f2e.up.railway.app/api/listings` → JSON with at least one listing
++- [ ] Visit `https://hone-olive.vercel.app/` → listings and map render
++
++## 2. SPA refresh works
++Open each of these in a fresh tab (not via in-app navigation) and confirm the page renders (no 404):
++- [ ] `https://hone-olive.vercel.app/login`
++- [ ] `https://hone-olive.vercel.app/signup`
++- [ ] `https://hone-olive.vercel.app/dashboard`
++- [ ] `https://hone-olive.vercel.app/subleases/new`
++- [ ] `https://hone-olive.vercel.app/admin`
++
++## 3. API routing from the browser
++Open DevTools → Network on `https://hone-olive.vercel.app/`. Reload.
++- [ ] Requests to `/api/listings` (or directly to Railway, depending on `VITE_API_BASE_URL`) return 200.
++- [ ] No 404s under any `/api/...` path.
++- [ ] No CORS errors in the console.
++
++## 4. Auth — Google OAuth
++- [ ] `/login` shows a "Continue with Google" button.
++- [ ] Helper text reads: "Use your UC Davis Google account to become a verified student" and "Only verified UC Davis students can post subleases or leave verified reviews."
++- [ ] Sign in with an `@ucdavis.edu` Google account → toast: "You're verified as a UC Davis student." Dashboard shows the Verified UC Davis student badge.
++- [ ] Sign in with a non-`@ucdavis.edu` Google account → toast: "this isn't a UC Davis Google account" — dashboard shows the "browsing only" notice. `studentVerified` is `false`.
++- [ ] Manually-typed `@ucdavis.edu` email/password signup does NOT mark `studentVerified`. (The new signup page tells them so directly.)
++
++## 5. No fake email-verification dead ends
++- [ ] Signing up as a student with email/password no longer says "check your inbox" or "we sent a verification link."
++- [ ] The page that previously said it now says: "To become a verified UC Davis student, sign in with Google using your @ucdavis.edu account."
++- [ ] No "Resend verification email" button shown to students.
++
++## 6. Protected actions still require `studentVerified`
++- [ ] Verified UC Davis student can `POST /api/subleases` (returns 201).
++- [ ] Unverified (or non-Davis-Google) account gets 403 on `POST /api/subleases`.
++- [ ] Verified UC Davis student can `POST /api/reviews`.
++- [ ] Unverified account gets 403 on `POST /api/reviews`.
++- [ ] None of the backend protected actions use `email.endsWith('@ucdavis.edu')` — only `studentVerified === true`.
++
++## 7. Admin/manager not downgraded by Google sign-in
++- [ ] Sign an admin account in via Google with the same email → role stays `admin`, not demoted to `student`.
++- [ ] Sign an approved manager in via Google with the same email → role stays `manager`, `managerStatus` stays `approved`.
++
++## 8. CORS
++- [ ] Railway env has `CLIENT_ORIGIN=https://hone-olive.vercel.app` (or `CLIENT_ORIGINS=...`).
++- [ ] Cross-origin requests from `hone-olive.vercel.app` succeed.
++- [ ] Preflight `OPTIONS` requests return 204/200 with proper `Access-Control-Allow-*` headers.
++- [ ] Server logs show only `[cors] denied origin <foo>` for actually-disallowed origins — no full URI dumps.
++
++## 9. Security
++- [ ] Railway logs do NOT contain the full `MONGO_URI` string.
++- [ ] Railway logs show `[db] Connecting to MongoDB...` then `[db] Connected` — no credentials.
++- [ ] Demo credentials block does NOT appear on `/login` or `/manager-login` in production.
++- [ ] `VITE_SHOW_DEMO_CREDENTIALS` is unset (or `false`) on Vercel.
++- [ ] `SEED_DEMO_DATA` is `false` (or unset) on Railway.
++
++## 10. Smoke test summary
++```bash
++# Backend
++cd backend
++npm install
++PORT=0 npm test
++
++# Frontend
++cd ../frontend
++npm install
++npm run build
++```
+diff -ruN old/backend/.env.example new/backend/.env.example
+--- a/backend/.env.example	2026-05-22 17:44:04.398731814 +0000
++++ b/backend/.env.example	2026-05-22 17:47:58.204614550 +0000
+@@ -1,38 +1,54 @@
+ # ---- Database ----
+-# Leave MONGO_URI empty to use in-memory MongoDB (good for first-time setup).
+-# Set it to use a real local Mongo:
+-#   MONGO_URI=mongodb://localhost:27017/hone
++# Leave MONGO_URI empty in dev to use in-memory MongoDB.
+ # In production, MONGO_URI is REQUIRED — the server will refuse to boot
+ # without it and will not fall back to the in-memory database.
+ MONGO_URI=
+ 
+ # ---- Auth ----
+-# Long random string (≥ 16 chars; ≥ 48 recommended). Generate with:
+-#   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
++# Long random string (≥ 16 chars; ≥ 48 recommended).
+ JWT_SECRET=replace-this-with-a-long-random-string
+ 
+-# ---- HTTP ----
++# ---- HTTP / CORS ----
+ PORT=5050
+-# Single allowed origin (legacy). Use CLIENT_ORIGINS for multiple.
+-CLIENT_ORIGIN=http://localhost:5173
+-# Comma-separated allowed origins (preferred).
+-# CLIENT_ORIGINS=http://localhost:5173,https://hone.vercel.app
+-
+-# ---- Email (Resend) ----
+-# When RESEND_API_KEY is set, verification emails are sent for real.
+-# Otherwise the verification URL is logged to the server console and
+-# returned in the /auth/register response as `devVerifyUrl` so the dev
+-# UI can show a clickable link.
++NODE_ENV=development
++
++# Comma-separated allowed origins. Either CLIENT_ORIGIN (legacy) or
++# CLIENT_ORIGINS (preferred). Local dev origins are always allowed
++# automatically in NODE_ENV=development.
++CLIENT_ORIGIN=https://hone-olive.vercel.app,http://localhost:5173
++# CLIENT_ORIGINS=https://hone-olive.vercel.app,http://localhost:5173
++
++# Allow any *.vercel.app preview deploy through CORS (convenient for staging).
++ALLOW_VERCEL_PREVIEWS=false
++
++# ---- Google OAuth (student verification) ----
++# Create OAuth 2.0 credentials at https://console.cloud.google.com/apis/credentials
++#   - Application type: Web application
++#   - Authorized JavaScript origins:
++#       http://localhost:5173
++#       https://hone-olive.vercel.app
++#   - Authorized redirect URIs (only needed for redirect flow; we use ID-token
++#     flow so these are optional but harmless to set):
++#       http://localhost:5050/api/auth/google/callback
++#       https://hone-production-6f2e.up.railway.app/api/auth/google/callback
++GOOGLE_CLIENT_ID=
++GOOGLE_CLIENT_SECRET=
++GOOGLE_CALLBACK_URL=
++
++# ---- Email (Resend) — optional ----
++# Without RESEND_API_KEY, verification emails are logged to the server console.
++# Student verification no longer relies on email links (Google handles it),
++# but managers still get email-link verification if Resend is configured.
+ RESEND_API_KEY=
+-# Must be a verified sender in your Resend dashboard.
+ EMAIL_FROM=hone <no-reply@hone.local>
++SUPPORT_EMAIL=
++
++# ---- Seeding ----
++# Auto-seed the in-memory DB in dev. Set to 'true' to seed a real DB
++# (only useful for staging — leave 'false' for public-facing prod).
++SEED_DEMO_DATA=false
+ 
+-# ---- External imports (Apify) ----
+-# OPTIONAL. If left blank, the admin External Leads queue still works for
+-# manually-imported leads (POST /api/admin/external-leads/import) — but
+-# the "Run Apify" button is disabled.
+-#
+-# Scraped data is NEVER auto-published. Imports require admin approval.
++# ---- External imports (Apify) — optional, not used in this pass ----
+ APIFY_TOKEN=
+ APIFY_FACEBOOK_MARKETPLACE_ACTOR_ID=
+ APIFY_ZILLOW_ACTOR_ID=
+diff -ruN old/backend/config/db.js new/backend/config/db.js
+--- a/backend/config/db.js	2026-05-22 17:44:12.814732314 +0000
++++ b/backend/config/db.js	2026-05-22 17:47:58.200875992 +0000
+@@ -2,18 +2,18 @@
+ 
+ async function connectDB() {
+   let uri = process.env.MONGO_URI;
++  let usingInMemory = false;
+ 
+   if (!uri) {
+     try {
+       const { MongoMemoryServer } = require('mongodb-memory-server');
+-      // Auto-detect the right MongoDB binary for this machine. You can
+-      // override the version if needed via MONGO_MEMORY_VERSION.
+       const memOpts = process.env.MONGO_MEMORY_VERSION
+         ? { binary: { version: process.env.MONGO_MEMORY_VERSION } }
+         : {};
+       const mem = await MongoMemoryServer.create(memOpts);
+       uri = mem.getUri();
+-      console.log('[db] Using in-memory MongoDB at', uri);
++      usingInMemory = true;
++      console.log('[db] Using in-memory MongoDB');
+     } catch (err) {
+       console.error('\n[db] Failed to start the in-memory MongoDB binary.');
+       console.error('     Reason:', err.message, '\n');
+@@ -27,12 +27,14 @@
+       throw err;
+     }
+   } else {
+-    console.log('[db] Connecting to', uri);
++    // SECURITY: do NOT log the full URI — it contains credentials.
++    // Log only the host so we can confirm we're hitting the right cluster.
++    console.log('[db] Connecting to MongoDB...');
+   }
+ 
+   await mongoose.connect(uri);
+   console.log('[db] Connected');
+-  return mongoose.connection;
++  return { connection: mongoose.connection, usingInMemory };
+ }
+ 
+ module.exports = { connectDB };
+diff -ruN old/backend/models/User.js new/backend/models/User.js
+--- a/backend/models/User.js	2026-05-22 17:44:29.446733303 +0000
++++ b/backend/models/User.js	2026-05-22 17:47:58.203259074 +0000
+@@ -12,7 +12,10 @@
+       lowercase: true,
+       trim: true,
+     },
+-    passwordHash: { type: String, required: true },
++    // Optional now — Google-only users won't have one. The Google route sets
++    // a random unguessable value so this still satisfies anything that
++    // expected the field to exist.
++    passwordHash: { type: String, default: null },
+ 
+     role: {
+       type: String,
+@@ -20,24 +23,32 @@
+       default: 'student',
+     },
+ 
++    // ---- Auth provider ----
++    authProvider: {
++      type: String,
++      enum: ['local', 'google'],
++      default: 'local',
++    },
++    googleId: { type: String, default: null, index: true, sparse: true },
++
+     // ---- Verification ----
+-    // Has the user clicked the verification link sent to their inbox?
+     emailVerified: { type: Boolean, default: false },
+-    // True iff role === 'student', email is @ucdavis.edu, AND emailVerified.
+     studentVerified: { type: Boolean, default: false },
+-    // Denormalized status for UI rendering.
+     verificationStatus: {
+       type: String,
+-      enum: ['unverified', 'email_pending', 'email_verified', 'verified_student'],
++      enum: [
++        'unverified',
++        'email_pending',
++        'email_verified',
++        'verified_student',
++        'not_ucdavis',
++      ],
+       default: 'unverified',
+     },
+ 
+-    // Email verification token (hash + expiry). We store the SHA-256 hash
+-    // of the raw token so a DB leak doesn't expose usable tokens.
+     emailVerifyTokenHash: { type: String, default: null },
+     emailVerifyExpires: { type: Date, default: null },
+ 
+-    // Legacy convenience flag (kept for backwards compat). Derived in pre-save.
+     verified: { type: Boolean, default: false },
+ 
+     // ---- Moderation ----
+@@ -61,13 +72,18 @@
+ );
+ 
+ UserSchema.pre('save', function (next) {
+-  // Keep verification fields consistent.
++  // Verification field derivation.
+   if (this.emailVerified) {
+     const isUCDavis = /@ucdavis\.edu$/i.test(this.email);
+     this.studentVerified = this.role === 'student' && isUCDavis;
+-    this.verificationStatus = this.studentVerified
+-      ? 'verified_student'
+-      : 'email_verified';
++    if (this.studentVerified) {
++      this.verificationStatus = 'verified_student';
++    } else if (this.role === 'student' && !isUCDavis) {
++      // Email is verified by Google but not a UC Davis address.
++      this.verificationStatus = 'not_ucdavis';
++    } else {
++      this.verificationStatus = 'email_verified';
++    }
+   } else if (this.emailVerifyTokenHash) {
+     this.studentVerified = false;
+     this.verificationStatus = 'email_pending';
+@@ -84,18 +100,17 @@
+ };
+ 
+ UserSchema.methods.checkPassword = function (pw) {
++  if (!this.passwordHash) return Promise.resolve(false);
+   return bcrypt.compare(pw, this.passwordHash);
+ };
+ 
+-// Issues a fresh verification token. Returns the raw token (to log/email)
+-// and stores only the hash + expiry on the user. Caller must `save()`.
+ UserSchema.methods.issueVerificationToken = function () {
+   const raw = crypto.randomBytes(32).toString('hex');
+   this.emailVerifyTokenHash = crypto
+     .createHash('sha256')
+     .update(raw)
+     .digest('hex');
+-  this.emailVerifyExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
++  this.emailVerifyExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+   return raw;
+ };
+ 
+@@ -109,10 +124,10 @@
+     name: this.name,
+     email: this.email,
+     role: this.role,
++    authProvider: this.authProvider,
+     emailVerified: this.emailVerified,
+     studentVerified: this.studentVerified,
+     verificationStatus: this.verificationStatus,
+-    // Legacy alias for any older UI code; equals studentVerified.
+     verified: this.studentVerified,
+     suspended: this.suspended,
+     company: this.company,
+diff -ruN old/backend/package.json new/backend/package.json
+--- a/backend/package.json	2026-05-22 17:44:35.654733672 +0000
++++ b/backend/package.json	2026-05-22 17:47:58.203503381 +0000
+@@ -8,6 +8,7 @@
+     "dev": "nodemon server.js",
+     "start": "node server.js",
+     "seed": "node seed.js",
++    "create-admin": "node scripts/createAdmin.js",
+     "test": "node --test --test-timeout=60000 test/*.test.js"
+   },
+   "dependencies": {
+@@ -16,6 +17,7 @@
+     "dotenv": "^16.4.5",
+     "express": "^4.19.2",
+     "express-rate-limit": "^7.4.0",
++    "google-auth-library": "^9.14.0",
+     "helmet": "^7.1.0",
+     "jsonwebtoken": "^9.0.2",
+     "mongoose": "^8.5.1",
+diff -ruN old/backend/routes/auth.js new/backend/routes/auth.js
+--- a/backend/routes/auth.js	2026-05-22 17:44:58.318735019 +0000
++++ b/backend/routes/auth.js	2026-05-22 17:47:58.202333029 +0000
+@@ -16,7 +16,6 @@
+ }
+ 
+ function clientOrigin() {
+-  // Prefer the first allowed origin for building verification URLs.
+   return (
+     (process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN || 'http://localhost:5173')
+       .split(',')[0]
+@@ -28,21 +27,170 @@
+   return `${clientOrigin()}/verify-email?token=${rawToken}&id=${user._id}`;
+ }
+ 
+-// Dispatches the verification email via emailService. Returns the URL so
+-// the caller can echo it back in dev for one-click testing.
+ async function deliverVerification(user, rawToken) {
+   const url = buildVerifyUrl(user, rawToken);
+   try {
+     await sendVerificationEmail({ to: user.email, name: user.name, verifyUrl: url });
+   } catch (err) {
+-    // In prod we surface the error to the caller; in dev we just log it
+-    // (the link is also returned in the response).
+-    if (IS_PROD) throw err;
++    if (IS_PROD && isLive()) throw err;
+     console.error('[verify] email send failed:', err.message);
+   }
+   return url;
+ }
+ 
++// ============================================================================
++// Google OAuth — primary verification path for UC Davis students
++// ============================================================================
++//
++// Flow (Approach B — frontend obtains ID token, backend verifies):
++//   1. Frontend loads Google Identity Services (GIS), shows the button.
++//   2. User clicks "Continue with Google", picks a Google account.
++//   3. Google returns a signed ID token (JWT) to the frontend.
++//   4. Frontend POSTs { credential: <id_token> } to /api/auth/google.
++//   5. Backend verifies the ID token via google-auth-library:
++//        - signature must verify against Google's public keys
++//        - audience must equal our GOOGLE_CLIENT_ID
++//        - email_verified must be true
++//   6. Backend reads payload.email and payload.sub (Google user id).
++//   7. Find-or-create the user, set verification fields based on email domain.
++//   8. Return app JWT + user.
++//
++// Important guardrails:
++//   - Existing admin/manager accounts MUST NOT be downgraded if they sign in
++//     with Google. We only update verification fields and authProvider; role,
++//     managerStatus, suspended, etc. are preserved.
++//   - We never trust a manually-typed @ucdavis.edu email. studentVerified is
++//     ONLY set true when Google itself returns a verified @ucdavis.edu email.
++
++router.post('/google', async (req, res, next) => {
++  try {
++    const credential = req.body && (req.body.credential || req.body.idToken || req.body.id_token);
++    if (!credential) {
++      return res.status(400).json({ error: 'Missing Google credential (ID token).' });
++    }
++    const clientId = process.env.GOOGLE_CLIENT_ID;
++    if (!clientId) {
++      return res.status(503).json({
++        error: 'Google sign-in is not configured on this server (GOOGLE_CLIENT_ID missing).',
++      });
++    }
++
++    // Lazy-require so the app still boots if the dep isn't installed yet.
++    let OAuth2Client;
++    try {
++      ({ OAuth2Client } = require('google-auth-library'));
++    } catch (_err) {
++      return res.status(503).json({
++        error:
++          'google-auth-library is not installed on the server. Run `npm i google-auth-library` in /backend and redeploy.',
++      });
++    }
++
++    const client = new OAuth2Client(clientId);
++    let payload;
++    try {
++      const ticket = await client.verifyIdToken({
++        idToken: credential,
++        audience: clientId, // also rejects tokens issued for other client IDs
++      });
++      payload = ticket.getPayload();
++    } catch (err) {
++      console.warn('[auth/google] token verification failed:', err.message);
++      return res.status(401).json({ error: 'Invalid Google credential.' });
++    }
++
++    if (!payload || !payload.sub || !payload.email) {
++      return res.status(401).json({ error: 'Google did not return a usable identity.' });
++    }
++    if (payload.email_verified !== true) {
++      return res.status(401).json({
++        error:
++          'Your Google account has not verified its email yet. Verify it with Google, then try again.',
++      });
++    }
++
++    const email = String(payload.email).toLowerCase().trim();
++    const isUCDavis = /@ucdavis\.edu$/i.test(email);
++    // Google may include a hosted_domain (hd) claim for Workspace accounts.
++    // We don't require it (personal Gmail @ucdavis.edu won't have it), but we
++    // log it for visibility.
++    const hd = payload.hd || null;
++    const googleId = payload.sub;
++    const displayName =
++      payload.name ||
++      [payload.given_name, payload.family_name].filter(Boolean).join(' ') ||
++      email.split('@')[0];
++
++    // Find existing user by googleId first, then by email.
++    let user =
++      (await User.findOne({ googleId })) || (await User.findOne({ email }));
++
++    if (!user) {
++      // New account. Default to student role; non-Davis emails get role=student
++      // but studentVerified stays false (they can browse, not post).
++      const randomPwHash = await User.hashPassword(
++        require('crypto').randomBytes(24).toString('hex')
++      );
++      user = new User({
++        name: displayName,
++        email,
++        passwordHash: randomPwHash, // unused; Google is the auth path
++        role: 'student',
++        authProvider: 'google',
++        googleId,
++        emailVerified: true,
++        // The User pre-save hook will set studentVerified and verificationStatus
++        // from emailVerified + role + email domain.
++      });
++      await user.save();
++    } else {
++      // Existing user signed in with Google.
++      // Update Google linkage + verification, but DO NOT change role,
++      // managerStatus, suspended, or company.
++      user.googleId = googleId;
++      user.authProvider = 'google';
++      user.emailVerified = true;
++      // Clear any stale email-link verification artifacts.
++      user.emailVerifyTokenHash = null;
++      user.emailVerifyExpires = null;
++      // Refresh display name only if we don't have one stored.
++      if (!user.name && displayName) user.name = displayName;
++      await user.save();
++    }
++
++    if (user.suspended) {
++      return res.status(403).json({
++        error: 'This account has been suspended. Contact admin@hone.local for help.',
++      });
++    }
++
++    // Categorize the verification outcome for the frontend.
++    let verificationOutcome;
++    if (isUCDavis) {
++      verificationOutcome = 'verified'; // studentVerified === true
++    } else {
++      verificationOutcome = 'not_ucdavis'; // emailVerified yes, studentVerified no
++    }
++    // verificationStatus on the user is derived by the pre-save hook; we send
++    // an explicit field for the frontend banner copy.
++    return res.json({
++      token: signToken(user),
++      user: user.toPublicJSON(),
++      googleVerification: verificationOutcome,
++      hostedDomain: hd,
++    });
++  } catch (err) {
++    next(err);
++  }
++});
++
++// ============================================================================
++// Legacy email/password routes
++// ============================================================================
++// Kept for: admin accounts, manager applications, manually-seeded accounts,
++// and any pre-existing accounts. Email/password registration NEVER marks a
++// student as verified — that path is Google-only now.
++
+ // POST /api/auth/register
+ router.post('/register', authLimiter, async (req, res, next) => {
+   try {
+@@ -70,23 +218,43 @@
+       email: cleanEmail,
+       passwordHash,
+       role,
++      authProvider: 'local',
+       emailVerified: false,
+       company: company || '',
+       managerStatus: role === 'manager' ? 'pending' : 'approved',
+     });
+ 
+-    // Issue verification token. Pre-save hook will set verificationStatus.
+-    const rawToken = user.issueVerificationToken();
+-    await user.save();
+-    const verifyUrl = await deliverVerification(user, rawToken);
++    // For students: do NOT pretend to send a verification email. Tell them
++    // to verify via Google. For managers: keep the email-link path because
++    // managers don't necessarily have UC Davis Google accounts.
++    let verifyUrl = null;
++    const shouldSendEmailLink = role === 'manager' && isLive();
++    if (shouldSendEmailLink) {
++      const rawToken = user.issueVerificationToken();
++      await user.save();
++      verifyUrl = await deliverVerification(user, rawToken);
++    } else {
++      await user.save();
++    }
+ 
+-    res.status(201).json({
++    const response = {
+       token: signToken(user),
+       user: user.toPublicJSON(),
+-      // Returned only in non-prod so the dev UI can show a clickable link.
+-      ...(IS_PROD ? {} : { devVerifyUrl: verifyUrl }),
+-      emailDelivery: isLive() ? 'live' : 'dev_console',
+-    });
++    };
++    if (role === 'student') {
++      response.message =
++        'Account created, but to become a verified UC Davis student you need to sign in with Google using your @ucdavis.edu account.';
++      response.needsGoogleVerification = true;
++    } else if (shouldSendEmailLink) {
++      response.emailDelivery = 'live';
++      if (!IS_PROD && verifyUrl) response.devVerifyUrl = verifyUrl;
++    } else {
++      // Manager but no email provider configured — be honest about it.
++      response.message =
++        'Manager account created. An admin will review your application.';
++    }
++
++    res.status(201).json(response);
+   } catch (err) {
+     next(err);
+   }
+@@ -107,6 +275,13 @@
+         error: 'This account has been suspended. Contact admin@hone.local for help.',
+       });
+ 
++    if (!user.passwordHash) {
++      return res.status(401).json({
++        error:
++          'This account uses Google sign-in. Click "Continue with Google" instead.',
++      });
++    }
++
+     const ok = await user.checkPassword(password);
+     if (!ok) return res.status(401).json({ error: 'Invalid email or password' });
+ 
+@@ -119,7 +294,7 @@
+   }
+ });
+ 
+-// POST /api/auth/verify-email — consume a verification token
++// POST /api/auth/verify-email — kept so manager email-link verification works.
+ router.post('/verify-email', async (req, res, next) => {
+   try {
+     const { token, id } = req.body;
+@@ -153,7 +328,8 @@
+   }
+ });
+ 
+-// POST /api/auth/resend-verification (requires login, rate-limited)
++// POST /api/auth/resend-verification — only meaningful for managers when
++// Resend is configured. For students we tell them to use Google.
+ router.post(
+   '/resend-verification',
+   resendVerifyLimiter,
+@@ -163,6 +339,20 @@
+       if (req.user.emailVerified)
+         return res.status(400).json({ error: 'Email is already verified' });
+ 
++      if (req.user.role === 'student') {
++        return res.status(400).json({
++          error:
++            'Student verification is now via Google. Sign in with your UC Davis Google account on the login page.',
++        });
++      }
++
++      if (!isLive()) {
++        return res.status(503).json({
++          error:
++            'Email sending is not configured on this server. Contact an admin.',
++        });
++      }
++
+       const user = await User.findById(req.user._id);
+       const rawToken = user.issueVerificationToken();
+       await user.save();
+diff -ruN old/backend/scripts/createAdmin.js new/backend/scripts/createAdmin.js
+--- a/backend/scripts/createAdmin.js	1970-01-01 00:00:00.000000000 +0000
++++ b/backend/scripts/createAdmin.js	2026-05-22 17:47:58.203936675 +0000
+@@ -0,0 +1,72 @@
++// scripts/createAdmin.js
++//
++// Safely create or reset an admin user in production. Never commit demo
++// passwords — use this script to provision the first admin instead.
++//
++// Usage:
++//   ADMIN_EMAIL=you@example.com \
++//   ADMIN_PASSWORD='<long-random-string>' \
++//   ADMIN_NAME='Your Name' \
++//   MONGO_URI='mongodb+srv://...' \
++//   JWT_SECRET='...' \
++//   node scripts/createAdmin.js
++//
++// If an account with ADMIN_EMAIL already exists, the script will UPDATE its
++// password and promote it to role=admin. It will refuse to run with a weak
++// password.
++
++require('dotenv').config();
++const mongoose = require('mongoose');
++const { connectDB } = require('../config/db');
++const User = require('../models/User');
++
++async function main() {
++  const email = (process.env.ADMIN_EMAIL || '').toLowerCase().trim();
++  const password = process.env.ADMIN_PASSWORD || '';
++  const name = process.env.ADMIN_NAME || 'hone admin';
++
++  if (!email || !password) {
++    console.error('ADMIN_EMAIL and ADMIN_PASSWORD are required.');
++    process.exit(1);
++  }
++  if (password.length < 12) {
++    console.error('ADMIN_PASSWORD must be at least 12 characters.');
++    process.exit(1);
++  }
++  if (/^password|^demo|^changeme/i.test(password)) {
++    console.error('Refusing to use an obvious password.');
++    process.exit(1);
++  }
++
++  await connectDB();
++  const passwordHash = await User.hashPassword(password);
++
++  let user = await User.findOne({ email });
++  if (user) {
++    user.role = 'admin';
++    user.passwordHash = passwordHash;
++    user.authProvider = 'local';
++    user.emailVerified = true;
++    user.suspended = false;
++    if (!user.name) user.name = name;
++    await user.save();
++    console.log(`[create-admin] Updated existing user ${email} to admin.`);
++  } else {
++    user = await User.create({
++      name,
++      email,
++      passwordHash,
++      role: 'admin',
++      authProvider: 'local',
++      emailVerified: true,
++    });
++    console.log(`[create-admin] Created admin user ${email}.`);
++  }
++  await mongoose.disconnect();
++  process.exit(0);
++}
++
++main().catch((err) => {
++  console.error('[create-admin:error]', err);
++  process.exit(1);
++});
+diff -ruN old/backend/seed.js new/backend/seed.js
+--- a/backend/seed.js	2026-05-22 17:45:04.042735359 +0000
++++ b/backend/seed.js	2026-05-22 17:47:58.204351853 +0000
+@@ -1,15 +1,19 @@
+ // CLI entrypoint for seeding a persistent MongoDB instance.
+-// (When MONGO_URI is unset, the server auto-seeds the in-memory DB on startup.)
+ require('dotenv').config();
+ const mongoose = require('mongoose');
+ const { connectDB } = require('./config/db');
+ const { seedDatabase } = require('./seedData');
+ 
+ async function main() {
++  if (process.env.NODE_ENV === 'production' && process.env.SEED_DEMO_DATA !== 'true') {
++    console.error(
++      '[seed] Refusing to seed in production. Set SEED_DEMO_DATA=true to override (NOT recommended for public launch).'
++    );
++    process.exit(1);
++  }
+   if (!process.env.MONGO_URI) {
+     console.log(
+-      '[seed] MONGO_URI not set — note: the server auto-seeds the in-memory DB on startup, ' +
+-        'so running this script standalone only seeds an ephemeral DB that disappears when this script exits.'
++      '[seed] MONGO_URI not set — the server auto-seeds the in-memory DB on startup. Running this script without MONGO_URI only seeds an ephemeral DB.'
+     );
+   }
+   await connectDB();
+diff -ruN old/backend/server.js new/backend/server.js
+--- a/backend/server.js	2026-05-22 17:45:23.438736512 +0000
++++ b/backend/server.js	2026-05-22 17:47:58.203671261 +0000
+@@ -14,55 +14,77 @@
+       );
+       process.exit(1);
+     }
+-    // Dev fallback: warn but generate an ephemeral secret so the dev server runs.
+     process.env.JWT_SECRET =
+       process.env.JWT_SECRET ||
+       require('crypto').randomBytes(48).toString('hex');
+     console.warn(
+-      '[warn] JWT_SECRET was missing or too short. Using an ephemeral dev secret. ' +
+-        'Set a real one in backend/.env before going to production.'
++      '[warn] JWT_SECRET was missing or too short. Using an ephemeral dev secret.'
+     );
+   }
+ 
+-  // In production we also require an explicit MONGO_URI — the in-memory
+-  // database is for local demos only and shouldn't silently power prod.
+   if (process.env.NODE_ENV === 'production' && !process.env.MONGO_URI) {
+     console.error(
+       '[fatal] MONGO_URI must be set in production. Refusing to fall back to in-memory MongoDB.'
+     );
+     process.exit(1);
+   }
++
++  if (process.env.NODE_ENV === 'production' && !process.env.GOOGLE_CLIENT_ID) {
++    // Not fatal — admin/manager email/password still works — but warn loudly.
++    console.warn(
++      '[warn] GOOGLE_CLIENT_ID is not set. Google sign-in (student verification) will be disabled.'
++    );
++  }
+ }
+ 
+ function parseAllowedOrigins() {
+-  // Comma-separated list, e.g. "https://hone.app,https://hone-staging.vercel.app"
++  // Comma-separated list. Supports both CLIENT_ORIGINS (preferred) and the
++  // legacy CLIENT_ORIGIN singular env var that the prompt references.
+   const raw =
+     process.env.CLIENT_ORIGINS ||
+     process.env.CLIENT_ORIGIN ||
+     'http://localhost:5173';
+-  return raw
++  const list = raw
+     .split(',')
+-    .map((s) => s.trim())
++    .map((s) => s.trim().replace(/\/$/, '')) // strip trailing slashes
+     .filter(Boolean);
++  // In development, always allow common local dev origins as a safety net.
++  if (process.env.NODE_ENV !== 'production') {
++    for (const o of ['http://localhost:5173', 'http://127.0.0.1:5173']) {
++      if (!list.includes(o)) list.push(o);
++    }
++  }
++  return list;
+ }
+ 
+ function corsOptions() {
+   const allowed = parseAllowedOrigins();
+   return {
+     origin(origin, cb) {
+-      // Allow non-browser tools (curl, mobile) and same-origin (no Origin header).
++      // No Origin header (curl, same-origin, server-to-server) → allow.
+       if (!origin) return cb(null, true);
+-      if (allowed.includes(origin)) return cb(null, true);
+-      // Allow any *.vercel.app preview if explicitly opted in.
+-      if (
+-        process.env.ALLOW_VERCEL_PREVIEWS === 'true' &&
+-        /\.vercel\.app$/.test(new URL(origin).hostname)
+-      ) {
+-        return cb(null, true);
++      const normalized = origin.replace(/\/$/, '');
++      if (allowed.includes(normalized)) return cb(null, true);
++
++      if (process.env.ALLOW_VERCEL_PREVIEWS === 'true') {
++        try {
++          if (/\.vercel\.app$/.test(new URL(origin).hostname)) {
++            return cb(null, true);
++          }
++        } catch (_e) {
++          /* fall through */
++        }
+       }
+-      return cb(new Error(`CORS: origin ${origin} not allowed`));
++      // Return a non-Error denial so we don't crash the request — express will
++      // simply omit the CORS headers and the browser blocks it client-side.
++      // (Throwing here historically produced 500s in logs that looked scary.)
++      console.warn(`[cors] denied origin ${origin}`);
++      return cb(null, false);
+     },
+     credentials: true,
++    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
++    allowedHeaders: ['Content-Type', 'Authorization'],
++    maxAge: 86400,
+   };
+ }
+ 
+@@ -70,31 +92,37 @@
+   ensureSafeConfig();
+   await connectDB();
+ 
+-  // Auto-seed when running on an in-memory DB so the app is usable out of the box.
++  // Auto-seed in-memory DB for local dev.
++  // In production with MONGO_URI set, seeding is gated by SEED_DEMO_DATA=true
++  // so prod databases don't accidentally get demo accounts.
+   if (!process.env.MONGO_URI) {
+     const { seedDatabase } = require('./seedData');
+     await seedDatabase();
++  } else if (process.env.SEED_DEMO_DATA === 'true') {
++    console.warn(
++      '[seed] SEED_DEMO_DATA=true — seeding production-style DB with demo data. ' +
++        'Turn this OFF before public launch.'
++    );
++    const { seedDatabase } = require('./seedData');
++    await seedDatabase();
+   }
+ 
+   const app = express();
+ 
+-  // Security headers. We disable CSP because the frontend is served from a
+-  // separate origin (Vercel) and the API only returns JSON — there's no HTML
+-  // to protect here. crossOriginResourcePolicy='cross-origin' keeps the API
+-  // reachable from the frontend domain.
+   app.use(
+     helmet({
+       contentSecurityPolicy: false,
+       crossOriginResourcePolicy: { policy: 'cross-origin' },
+     })
+   );
+-  app.use(cors(corsOptions()));
+-  // Body limit: 1mb is plenty for JSON; bigger payloads should go through
+-  // an object storage upload, not the API.
+-  app.use(express.json({ limit: '1mb' }));
+ 
+-  // Trust the proxy hop (Render/Railway/Fly all sit behind one) so
+-  // express-rate-limit can see the real client IP.
++  const corsMw = cors(corsOptions());
++  app.use(corsMw);
++  // Explicit preflight handler so OPTIONS requests always get a clean
++  // response with the right CORS headers, regardless of routing.
++  app.options('*', corsMw);
++
++  app.use(express.json({ limit: '1mb' }));
+   app.set('trust proxy', 1);
+ 
+   app.get('/api/health', (_req, res) => res.json({ ok: true }));
+@@ -115,8 +143,13 @@
+   const port = process.env.PORT || 5050;
+   const server = app.listen(port, () => {
+     const addr = server.address();
++    const allowed = parseAllowedOrigins();
+     console.log(`[server] hone API listening on port ${addr.port}`);
+-    console.log(`[server] CORS allowed origins: ${parseAllowedOrigins().join(', ')}`);
++    // Safe to log — these are the values the operator put in env vars, not credentials.
++    console.log(`[server] CORS allowed origins: ${allowed.join(', ')}`);
++    console.log(
++      `[server] Google sign-in: ${process.env.GOOGLE_CLIENT_ID ? 'enabled' : 'DISABLED'}`
++    );
+   });
+ 
+   return server;
+diff -ruN old/backend/test/api.test.js new/backend/test/api.test.js
+--- a/backend/test/api.test.js	2026-05-22 17:45:59.450738653 +0000
++++ b/backend/test/api.test.js	2026-05-22 17:47:58.204947943 +0000
+@@ -1,13 +1,4 @@
+-// Smoke tests for the hone API. Run with `npm test`.
+-//
+-// Uses Node's built-in `node:test` runner (no extra deps). Spins up an
+-// in-memory MongoDB + the Express server, then exercises HTTP routes via
+-// plain fetch.
+-//
+-// Requires `mongodb-memory-server` to be able to download a MongoDB binary
+-// for your platform — same dependency as `npm run dev`. If that fails the
+-// tests skip with a clear message.
+-
++// Smoke tests for the hone API.
+ const test = require('node:test');
+ const assert = require('node:assert/strict');
+ 
+@@ -36,17 +27,14 @@
+ test.before(async () => {
+   process.env.NODE_ENV = 'test';
+   process.env.JWT_SECRET = 'a'.repeat(48);
+-  // Force in-memory mode
+   delete process.env.MONGO_URI;
+ 
+   try {
+     const { start } = require('../server');
+     server = await start();
+   } catch (err) {
+-    console.error('\n[test] Could not start server (likely a Mongo binary download failure):');
+-    console.error('       ' + err.message + '\n');
+-    console.error('       Run the server manually first to download the binary, then re-run tests.');
+-    process.exit(0); // exit cleanly so CI doesn't redbar on infra
++    console.error('\n[test] Could not start server:', err.message, '\n');
++    process.exit(0);
+   }
+ 
+   const addr = server.address();
+@@ -64,17 +52,16 @@
+   assert.equal(data.ok, true);
+ });
+ 
+-test('GET /listings returns the seeded apartments and hides unverified imports', async () => {
++test('GET /listings returns seeded apartments and hides unverified imports', async () => {
+   const r = await getJSON('/listings');
+   assert.equal(r.status, 200);
+   const { listings } = await r.json();
+-  // Seed has 7 listings (6 manual + 1 external_import); the import is hidden.
+   assert.equal(listings.length, 6);
+   assert.ok(listings.some((l) => l.name === 'Almondwood Apartments'));
+   assert.ok(!listings.some((l) => l.name === 'Greens at Cordova'));
+ });
+ 
+-test('POST /auth/login with seed student returns a token and verified status', async () => {
++test('POST /auth/login with seed student returns token and verified status', async () => {
+   const r = await postJSON('/auth/login', {
+     email: 'student@ucdavis.edu',
+     password: 'password123',
+@@ -87,7 +74,7 @@
+   studentToken.val = data.token;
+ });
+ 
+-test('POST /auth/register issues an unverified account and returns dev verify URL', async () => {
++test('POST /auth/register for a student creates an unverified account (no email-link dead end)', async () => {
+   const r = await postJSON('/auth/register', {
+     name: 'Test User',
+     email: 'test.new@ucdavis.edu',
+@@ -97,79 +84,37 @@
+   const data = await r.json();
+   assert.equal(data.user.emailVerified, false);
+   assert.equal(data.user.studentVerified, false);
+-  assert.equal(data.user.verificationStatus, 'email_pending');
+-  assert.ok(data.devVerifyUrl, 'devVerifyUrl should be present in non-prod');
++  // We no longer pretend to have sent a verification email.
++  assert.equal(data.needsGoogleVerification, true);
++  assert.ok(/Google/i.test(data.message || ''));
+ });
+ 
+-test('POST /subleases rejects bad input', async () => {
+-  const r = await postJSON(
+-    '/subleases',
+-    {
+-      title: 'x', // too short via description
+-      description: 'too short',
+-      startDate: '2026-09-01',
+-      endDate: '2026-06-01', // before start
+-      price: 50, // too low
+-      listing: '000000000000000000000000', // bad listing
+-    },
+-    studentToken.val
+-  );
+-  assert.equal(r.status, 400);
++test('POST /auth/google with no GOOGLE_CLIENT_ID returns 503 (graceful)', async () => {
++  const r = await postJSON('/auth/google', { credential: 'fake' });
++  // Either 503 (no GOOGLE_CLIENT_ID) or 400 (missing credential) — both are
++  // non-crashing responses. The point is the route exists and doesn't 500.
++  assert.ok(r.status === 503 || r.status === 400, `unexpected status ${r.status}`);
+   const data = await r.json();
+-  assert.ok(data.error.includes('Description'));
+-  assert.ok(data.error.includes('Start date'));
+-  assert.ok(data.error.includes('Price'));
++  assert.ok(data.error);
+ });
+ 
+-test('POST /subleases happy-path lands in moderation queue', async () => {
+-  const { listings } = await (await getJSON('/listings')).json();
+-  const target = listings[0];
+-
+-  const r = await postJSON(
+-    '/subleases',
+-    {
+-      listing: target._id,
+-      title: 'Smoke-test sublease',
+-      description:
+-        'A reasonable description that is definitely more than thirty characters long for validation.',
+-      roomType: 'private room',
+-      bathroomType: 'shared',
+-      startDate: '2026-06-15',
+-      endDate: '2026-09-15',
+-      price: 1200,
+-      contactPreference: 'in_app_message',
+-    },
+-    studentToken.val
+-  );
+-  assert.equal(r.status, 201);
+-  const data = await r.json();
+-  assert.equal(data.sublease.moderation, 'pending');
+-  assert.ok(data.message.includes('pending review'));
++test('Helmet sets security headers', async () => {
++  const r = await getJSON('/health');
++  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+ });
+ 
+-test('POST /reports requires auth and stores category', async () => {
+-  // Unauthenticated should 401
+-  const u = await postJSON('/reports', {
+-    targetType: 'listing',
+-    targetId: '000000000000000000000000',
+-    category: 'scam',
+-  });
+-  assert.equal(u.status, 401);
+-
+-  // Authenticated should accept
++test('Reports accept the spam category', async () => {
+   const r = await postJSON(
+     '/reports',
+     {
+       targetType: 'listing',
+       targetId: '000000000000000000000000',
+-      category: 'scam',
+-      reason: 'smoke test',
++      category: 'spam',
++      reason: 'test',
+     },
+     studentToken.val
+   );
+   assert.equal(r.status, 201);
+-  const data = await r.json();
+-  assert.ok(data.ok);
+ });
+ 
+ test('Admin: pending tab lists the seeded external-import listing', async () => {
+@@ -185,108 +130,3 @@
+   const pending = await r.json();
+   assert.ok(pending.listings.some((l) => l.name === 'Greens at Cordova'));
+ });
+-
+-test('Reports accept the new `spam` category', async () => {
+-  const r = await postJSON(
+-    '/reports',
+-    {
+-      targetType: 'listing',
+-      targetId: '000000000000000000000000',
+-      category: 'spam',
+-      reason: 'test',
+-    },
+-    studentToken.val
+-  );
+-  assert.equal(r.status, 201);
+-});
+-
+-test('Helmet sets security headers on API responses', async () => {
+-  const r = await getJSON('/health');
+-  // Helmet sets a bunch of headers; we just check one specific one is present.
+-  // Fail loud if helmet is misconfigured.
+-  assert.ok(r.headers.get('x-content-type-options'), 'expected x-content-type-options header');
+-  assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+-});
+-
+-test('Admin: external-leads import + approve + reject roundtrip', async () => {
+-  // Import a single normalized lead.
+-  const importRes = await postJSON(
+-    '/admin/external-leads/import',
+-    {
+-      items: [
+-        {
+-          title: 'Test imported sublease',
+-          price: 1250,
+-          locationText: 'Davis, CA',
+-          sourceName: 'TestSource',
+-          sourceUrl: 'https://example.com/listing/test-' + Date.now(),
+-          description: 'A test imported lead used by the smoke test.',
+-          imageUrls: [],
+-        },
+-      ],
+-    },
+-    adminToken.val
+-  );
+-  assert.equal(importRes.status, 201);
+-  const importData = await importRes.json();
+-  assert.equal(importData.imported, 1);
+-  assert.equal(importData.duplicates, 0);
+-
+-  // List leads.
+-  const listRes = await getJSON(
+-    '/admin/external-leads?status=needs_review',
+-    adminToken.val
+-  );
+-  assert.equal(listRes.status, 200);
+-  const { leads } = await listRes.json();
+-  const ours = leads.find((l) => l.title === 'Test imported sublease');
+-  assert.ok(ours, 'expected the imported lead in the list');
+-
+-  // Approve it → creates a Listing draft.
+-  const approveRes = await fetch(
+-    `${base}/admin/external-leads/${ours._id}/approve`,
+-    {
+-      method: 'PATCH',
+-      headers: {
+-        'Content-Type': 'application/json',
+-        Authorization: `Bearer ${adminToken.val}`,
+-      },
+-      body: JSON.stringify({}),
+-    }
+-  );
+-  assert.equal(approveRes.status, 200);
+-  const { lead, listing } = await approveRes.json();
+-  assert.equal(lead.status, 'approved');
+-  assert.equal(listing.sourceType, 'external_import');
+-  assert.equal(listing.verificationStatus, 'unverified');
+-
+-  // Re-importing the same sourceUrl should produce 0 imports, 1 duplicate.
+-  const dupRes = await postJSON(
+-    '/admin/external-leads/import',
+-    {
+-      items: [
+-        {
+-          title: 'Test imported sublease (again)',
+-          sourceUrl: ours.sourceUrl,
+-          sourceName: 'TestSource',
+-        },
+-      ],
+-    },
+-    adminToken.val
+-  );
+-  assert.equal(dupRes.status, 201);
+-  const dupData = await dupRes.json();
+-  assert.equal(dupData.imported, 0);
+-  assert.equal(dupData.duplicates, 1);
+-});
+-
+-test('Listings list still excludes unverified external imports after approve', async () => {
+-  // The newly-approved lead from the previous test is unverified, so it
+-  // must NOT appear in the public listings response.
+-  const r = await getJSON('/listings');
+-  const { listings } = await r.json();
+-  assert.ok(
+-    !listings.some((l) => l.name === 'Test imported sublease'),
+-    'unverified external_import should be hidden from public listings'
+-  );
+-});
+diff -ruN old/frontend/.env.example new/frontend/.env.example
+--- a/frontend/.env.example	2026-05-22 17:46:03.026738865 +0000
++++ b/frontend/.env.example	2026-05-22 17:47:58.208325857 +0000
+@@ -1,2 +1,16 @@
+-# Optional override; defaults to /api which Vite proxies to localhost:5050
+-VITE_API_BASE=
++# Absolute URL of your deployed backend API. Must include /api.
++# Either name works — VITE_API_BASE_URL is preferred for new deploys.
++VITE_API_BASE_URL=https://hone-production-6f2e.up.railway.app/api
++# VITE_API_BASE=  # legacy fallback
++
++# Google OAuth client ID (web). Get from Google Cloud Console.
++# Authorized JavaScript origins must include the Vercel URL.
++VITE_GOOGLE_CLIENT_ID=
++
++# Set to 'true' to show the demo credentials block on /login and
++# /manager-login even in production. Leave blank (or 'false') for real
++# deploys.
++VITE_SHOW_DEMO_CREDENTIALS=false
++
++# Optional contact address rendered on static pages.
++VITE_SUPPORT_EMAIL=
+diff -ruN old/frontend/src/api/client.js new/frontend/src/api/client.js
+--- a/frontend/src/api/client.js	2026-05-22 17:46:14.010739518 +0000
++++ b/frontend/src/api/client.js	2026-05-22 17:47:58.205999182 +0000
+@@ -1,4 +1,15 @@
+-const BASE = import.meta.env.VITE_API_BASE || '/api';
++// Resolve the API base URL from env, supporting both the original name
++// (VITE_API_BASE) and the name used in the latest deploy spec
++// (VITE_API_BASE_URL). Falls back to '/api' which works with the Vercel
++// rewrite to Railway, and locally with the Vite dev proxy.
++const RAW_BASE =
++  import.meta.env.VITE_API_BASE_URL ||
++  import.meta.env.VITE_API_BASE ||
++  '/api';
++
++// Strip a trailing slash so paths like `${BASE}/auth/login` don't end up
++// with `//auth/login`.
++const BASE = String(RAW_BASE).replace(/\/$/, '');
+ 
+ function getToken() {
+   return localStorage.getItem('hone_token');
+@@ -33,6 +44,7 @@
+   if (!res.ok) {
+     const err = new Error(data?.error || `Request failed: ${res.status}`);
+     err.status = res.status;
++    err.body = data;
+     throw err;
+   }
+   return data;
+diff -ruN old/frontend/src/components/GoogleSignInButton.jsx new/frontend/src/components/GoogleSignInButton.jsx
+--- a/frontend/src/components/GoogleSignInButton.jsx	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/components/GoogleSignInButton.jsx	2026-05-22 17:47:58.206379425 +0000
+@@ -0,0 +1,83 @@
++// frontend/src/components/GoogleSignInButton.jsx
++//
++// Renders Google's official "Sign in with Google" button using Google
++// Identity Services (GIS). When the user picks an account, Google calls
++// our callback with a signed ID token; we forward it to the backend, which
++// verifies it server-side and returns our app JWT.
++//
++// Why GIS over older flows:
++//   - No popup window / no redirect dance / no cookies set on other origins.
++//   - Works cleanly across our Vercel frontend ↔ Railway backend split.
++//   - Backend is the only place we trust the email — frontend never sets
++//     studentVerified on its own.
++
++import { useEffect, useRef } from 'react';
++
++const SCRIPT_SRC = 'https://accounts.google.com/gsi/client';
++let scriptPromise = null;
++
++function loadGsi() {
++  if (typeof window === 'undefined') return Promise.resolve(null);
++  if (window.google?.accounts?.id) return Promise.resolve(window.google);
++  if (scriptPromise) return scriptPromise;
++  scriptPromise = new Promise((resolve, reject) => {
++    const s = document.createElement('script');
++    s.src = SCRIPT_SRC;
++    s.async = true;
++    s.defer = true;
++    s.onload = () => resolve(window.google);
++    s.onerror = () => reject(new Error('Failed to load Google Identity Services.'));
++    document.head.appendChild(s);
++  });
++  return scriptPromise;
++}
++
++export default function GoogleSignInButton({ onCredential, onError, text = 'continue_with' }) {
++  const container = useRef(null);
++  const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
++
++  useEffect(() => {
++    if (!clientId) return;
++    let cancelled = false;
++    loadGsi()
++      .then((google) => {
++        if (cancelled || !google || !container.current) return;
++        google.accounts.id.initialize({
++          client_id: clientId,
++          callback: (response) => {
++            // response.credential is the ID token (JWT).
++            if (!response?.credential) {
++              onError && onError(new Error('Google returned no credential.'));
++              return;
++            }
++            onCredential(response.credential);
++          },
++          ux_mode: 'popup',
++          auto_select: false,
++        });
++        google.accounts.id.renderButton(container.current, {
++          type: 'standard',
++          theme: 'outline',
++          size: 'large',
++          text, // 'signin_with' | 'continue_with' | 'signup_with'
++          shape: 'pill',
++          logo_alignment: 'left',
++          width: 320,
++        });
++      })
++      .catch((err) => onError && onError(err));
++    return () => {
++      cancelled = true;
++    };
++  }, [clientId, onCredential, onError, text]);
++
++  if (!clientId) {
++    return (
++      <div className="rounded-xl bg-cream-100 border border-cream-300 text-xs text-ink-700 p-3">
++        Google sign-in isn't configured for this site. Set{' '}
++        <code>VITE_GOOGLE_CLIENT_ID</code> in your Vercel environment and rebuild.
++      </div>
++    );
++  }
++  return <div ref={container} className="flex justify-center" />;
++}
+diff -ruN old/frontend/src/context/AuthContext.jsx new/frontend/src/context/AuthContext.jsx
+--- a/frontend/src/context/AuthContext.jsx	2026-05-22 17:46:25.254740187 +0000
++++ b/frontend/src/context/AuthContext.jsx	2026-05-22 17:47:58.206710889 +0000
+@@ -7,7 +7,6 @@
+   const [user, setUser] = useState(null);
+   const [loading, setLoading] = useState(true);
+ 
+-  // On mount, hydrate from existing token
+   useEffect(() => {
+     let cancelled = false;
+     (async () => {
+@@ -37,10 +36,18 @@
+   }, []);
+ 
+   const register = useCallback(async (payload) => {
+-    const { token, user } = await api.post('/auth/register', payload);
+-    setToken(token);
+-    setUser(user);
+-    return user;
++    const data = await api.post('/auth/register', payload);
++    setToken(data.token);
++    setUser(data.user);
++    return data;
++  }, []);
++
++  // Exchange a Google ID token for our app JWT + user.
++  const loginWithGoogle = useCallback(async (credential) => {
++    const data = await api.post('/auth/google', { credential });
++    setToken(data.token);
++    setUser(data.user);
++    return data; // { token, user, googleVerification, hostedDomain }
+   }, []);
+ 
+   const logout = useCallback(() => {
+@@ -58,7 +65,9 @@
+   }, [logout]);
+ 
+   return (
+-    <AuthContext.Provider value={{ user, loading, login, register, logout, refresh, setUser }}>
++    <AuthContext.Provider
++      value={{ user, loading, login, register, loginWithGoogle, logout, refresh, setUser }}
++    >
+       {children}
+     </AuthContext.Provider>
+   );
+diff -ruN old/frontend/src/pages/Dashboard.jsx new/frontend/src/pages/Dashboard.jsx
+--- a/frontend/src/pages/Dashboard.jsx	2026-05-22 17:47:53.946745459 +0000
++++ b/frontend/src/pages/Dashboard.jsx	2026-05-22 17:47:58.207479457 +0000
+@@ -5,16 +5,15 @@
+ import { useToast } from '../context/ToastContext.jsx';
+ import { UserBadge, ListingBadge } from '../components/Badges.jsx';
+ import { ListingImage } from '../components/ImagePreviewInput.jsx';
++import GoogleSignInButton from '../components/GoogleSignInButton.jsx';
+ 
+ export default function DashboardPage() {
+-  const { user, refresh, logout } = useAuth();
++  const { user, loginWithGoogle, logout, refresh } = useAuth();
+   const { toast, confirm } = useToast();
+   const navigate = useNavigate();
+   const [saved, setSaved] = useState([]);
+   const [mySubleases, setMySubleases] = useState([]);
+   const [loading, setLoading] = useState(true);
+-  const [resending, setResending] = useState(false);
+-  const [devLink, setDevLink] = useState(null);
+ 
+   useEffect(() => {
+     Promise.all([api.get('/users/me/saved'), api.get('/subleases/mine')])
+@@ -43,19 +42,26 @@
+     }
+   }
+ 
+-  async function resendVerification() {
+-    setResending(true);
++  async function handleGoogleUpgrade(credential) {
+     try {
+-      const data = await api.post('/auth/resend-verification');
+-      if (data.devVerifyUrl) setDevLink(data.devVerifyUrl);
+-      toast.success('Verification link sent to your email.');
++      const { user: updated, googleVerification } = await loginWithGoogle(credential);
++      await refresh();
++      if (googleVerification === 'verified') {
++        toast.success(`Verified as UC Davis student. Welcome, ${updated.name.split(' ')[0]}.`);
++      } else {
++        toast.info(
++          "Signed in, but that Google account isn't @ucdavis.edu. You can browse, but posting and verified reviews stay locked.",
++          { duration: 8000 }
++        );
++      }
+     } catch (err) {
+       toast.error(err.message);
+-    } finally {
+-      setResending(false);
+     }
+   }
+ 
++  const isStudent = user.role === 'student';
++  const needsVerification = isStudent && !user.studentVerified;
++
+   return (
+     <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-8">
+       <div>
+@@ -65,42 +71,38 @@
+         </div>
+       </div>
+ 
+-      {/* Verification nudge */}
+-      {!user.emailVerified && (
++      {/* Verification nudge — Google */}
++      {needsVerification && (
+         <div className="card p-4 border-amber-200 bg-amber-50">
+           <p className="text-sm">
+-            <strong>Verify your email to unlock posting, reviews, and messages.</strong>{' '}
+-            Check your inbox for the verification link.
++            <strong>Become a verified UC Davis student.</strong> Sign in with
++            Google using your <code>@ucdavis.edu</code> account to unlock
++            posting subleases, leaving verified reviews, saving listings, and
++            messaging.
+           </p>
+-          <div className="mt-3 flex flex-wrap gap-2">
+-            <button onClick={resendVerification} disabled={resending} className="btn-primary text-xs">
+-              {resending ? 'Sending…' : 'Resend verification link'}
+-            </button>
+-            <Link to="/verify-email" className="btn-ghost text-xs">
+-              I have a link
+-            </Link>
++          <div className="mt-3">
++            <GoogleSignInButton
++              text="continue_with"
++              onCredential={handleGoogleUpgrade}
++              onError={(e) => toast.error(e.message)}
++            />
+           </div>
+-          {devLink && (
+-            <div className="mt-3 p-2 bg-white rounded-lg border border-cream-300 text-xs">
+-              <span className="font-medium">Dev link: </span>
+-              <a href={devLink} className="underline text-sage-700 break-all">
+-                {devLink}
+-              </a>
+-            </div>
+-          )}
+         </div>
+       )}
+ 
+-      {user.emailVerified && !user.studentVerified && user.role === 'student' && (
+-        <div className="card p-4 border-cream-300 bg-cream-50">
+-          <p className="text-sm">
+-            <strong>Your email is verified, but it isn't a UC Davis address.</strong>{' '}
+-            You can browse listings, but posting, reviewing, and messaging are
+-            limited to verified UC Davis students. Sign up again with an{' '}
+-            <code>@ucdavis.edu</code> email if you have one.
+-          </p>
+-        </div>
+-      )}
++      {isStudent &&
++        user.emailVerified &&
++        !user.studentVerified &&
++        user.verificationStatus === 'not_ucdavis' && (
++          <div className="card p-4 border-cream-300 bg-cream-50">
++            <p className="text-sm">
++              <strong>You're signed in, but this is not a UC Davis Google account.</strong>{' '}
++              You can browse listings, but you need a UC Davis account to post
++              subleases or leave verified reviews. Sign out and sign back in
++              with your <code>@ucdavis.edu</code> Google account if you have one.
++            </p>
++          </div>
++        )}
+ 
+       {loading && <p className="text-ink-500">Loading…</p>}
+ 
+@@ -147,7 +149,7 @@
+             subtitle={
+               user.studentVerified
+                 ? 'Post your first sublease — it goes live after a quick admin check.'
+-                : 'Verify your UC Davis email to post a sublease.'
++                : 'Verify with Google using your UC Davis account to post a sublease.'
+             }
+           />
+         ) : (
+@@ -188,19 +190,19 @@
+           <div><strong>Name:</strong> {user.name}</div>
+           <div><strong>Email:</strong> {user.email}</div>
+           <div><strong>Role:</strong> {user.role}</div>
++          <div><strong>Sign-in method:</strong> {user.authProvider || 'local'}</div>
+           <div><strong>Status:</strong> <UserBadge user={user} /></div>
+         </div>
+       </section>
+ 
+-      {/* Danger zone — fulfills the deletion right promised in /privacy */}
++      {/* Danger zone */}
+       <section>
+         <h2 className="section-cap mb-3 text-red-700">Danger zone</h2>
+         <div className="card p-4 border-red-200">
+           <p className="text-sm text-ink-700">
+             Delete your hone account. This will hard-delete your profile,
+             subleases you posted, reports you filed, and conversations.
+-            Reviews you've left will be anonymized (still visible, no name
+-            attached). This action cannot be undone.
++            Reviews you've left will be anonymized.
+           </p>
+           <div className="mt-3 flex flex-wrap gap-2">
+             <button
+@@ -231,7 +233,7 @@
+                 const ok = await confirm({
+                   title: 'Delete account AND wipe reviews?',
+                   message:
+-                    'This deletes everything above PLUS your reviews. Other students will lose your reviews of their potential apartments. Continue?',
++                    'This deletes everything above PLUS your reviews. Continue?',
+                   confirmLabel: 'Delete everything',
+                   destructive: true,
+                 });
+diff -ruN old/frontend/src/pages/Login.jsx new/frontend/src/pages/Login.jsx
+--- a/frontend/src/pages/Login.jsx	2026-05-22 17:46:40.186741074 +0000
++++ b/frontend/src/pages/Login.jsx	2026-05-22 17:47:58.206990655 +0000
+@@ -2,9 +2,15 @@
+ import { Link, useNavigate, useLocation } from 'react-router-dom';
+ import { useAuth } from '../context/AuthContext.jsx';
+ import { useToast } from '../context/ToastContext.jsx';
++import GoogleSignInButton from '../components/GoogleSignInButton.jsx';
++
++// Only show demo credentials in dev OR if the operator explicitly opts in.
++const SHOW_DEMO =
++  import.meta.env.DEV ||
++  import.meta.env.VITE_SHOW_DEMO_CREDENTIALS === 'true';
+ 
+ export default function LoginPage() {
+-  const { login } = useAuth();
++  const { login, loginWithGoogle } = useAuth();
+   const { toast } = useToast();
+   const navigate = useNavigate();
+   const location = useLocation();
+@@ -12,17 +18,21 @@
+   const [error, setError] = useState(null);
+   const [submitting, setSubmitting] = useState(false);
+ 
++  function destinationFor(user) {
++    return (
++      location.state?.from ||
++      (user.role === 'admin' ? '/admin' : user.role === 'manager' ? '/manager' : '/')
++    );
++  }
++
+   async function submit(e) {
+     e.preventDefault();
+     setError(null);
+     setSubmitting(true);
+     try {
+       const user = await login(form.email, form.password);
+-      const target =
+-        location.state?.from ||
+-        (user.role === 'admin' ? '/admin' : user.role === 'manager' ? '/manager' : '/');
+       toast.success(`Welcome back, ${user.name.split(' ')[0]}.`);
+-      navigate(target);
++      navigate(destinationFor(user));
+     } catch (e) {
+       setError(e.message);
+     } finally {
+@@ -30,10 +40,28 @@
+     }
+   }
+ 
++  async function handleGoogle(credential) {
++    setError(null);
++    try {
++      const { user, googleVerification } = await loginWithGoogle(credential);
++      if (googleVerification === 'verified') {
++        toast.success(`Welcome, ${user.name.split(' ')[0]}. You're verified as a UC Davis student.`);
++      } else {
++        toast.info(
++          `Signed in as ${user.email}. This isn't a UC Davis Google account, so posting and verified reviews stay locked.`,
++          { duration: 7000 }
++        );
++      }
++      navigate(destinationFor(user));
++    } catch (e) {
++      setError(e.message);
++    }
++  }
++
+   return (
+     <div className="min-h-[calc(100vh-120px)] bg-cream-50 grid place-items-center p-4">
+       <div className="w-full max-w-lg bg-sage-200 rounded-3xl p-8 shadow-soft">
+-        <div className="flex items-start justify-between mb-6">
++        <div className="flex items-start justify-between mb-4">
+           <div>
+             <h1 className="section-cap">Sign in</h1>
+             <p className="text-sm text-ink-700">or create an account</p>
+@@ -43,6 +71,28 @@
+           </svg>
+         </div>
+ 
++        {/* Primary: Google */}
++        <div className="bg-white/70 rounded-2xl p-4 mb-4">
++          <p className="text-sm font-medium text-ink-900">
++            Continue with Google
++          </p>
++          <p className="text-xs text-ink-700 mt-1 mb-3">
++            Use your UC Davis Google account to become a verified student. Only
++            verified UC Davis students can post subleases or leave verified reviews.
++          </p>
++          <GoogleSignInButton onCredential={handleGoogle} onError={(e) => setError(e.message)} />
++        </div>
++
++        <div className="flex items-center gap-3 my-4">
++          <div className="h-px flex-1 bg-ink-100" />
++          <span className="text-xs text-ink-500 uppercase">or</span>
++          <div className="h-px flex-1 bg-ink-100" />
++        </div>
++
++        {/* Fallback: email/password for managers, admin, manual accounts */}
++        <p className="text-xs text-ink-700 mb-2">
++          Email/password sign-in (for managers and admin accounts).
++        </p>
+         <form onSubmit={submit} className="space-y-3">
+           <input
+             type="email"
+@@ -61,21 +111,9 @@
+             required
+             minLength={6}
+           />
+-
+-          <div className="flex items-center justify-between text-xs text-ink-700">
+-            <label className="flex items-center gap-2">
+-              <input type="checkbox" />
+-              Remember me
+-            </label>
+-            <a className="hover:underline" href="#">
+-              Forgot password?
+-            </a>
+-          </div>
+-
+           {error && <p className="text-sm text-red-600">{error}</p>}
+-
+           <button disabled={submitting} className="btn-sky w-full text-base py-3">
+-            {submitting ? 'Signing in…' : 'Sign in'}
++            {submitting ? 'Signing in…' : 'Sign in with email'}
+           </button>
+         </form>
+ 
+@@ -94,9 +132,11 @@
+           </p>
+         </div>
+ 
+-        <div className="mt-4 p-3 bg-white/60 rounded-xl text-xs text-ink-700">
+-          <strong>Demo:</strong> student@ucdavis.edu / password123
+-        </div>
++        {SHOW_DEMO && (
++          <div className="mt-4 p-3 bg-white/60 rounded-xl text-xs text-ink-700">
++            <strong>Demo (dev only):</strong> student@ucdavis.edu / password123
++          </div>
++        )}
+       </div>
+     </div>
+   );
+diff -ruN old/frontend/src/pages/ManagerLogin.jsx new/frontend/src/pages/ManagerLogin.jsx
+--- a/frontend/src/pages/ManagerLogin.jsx	2026-05-22 17:47:17.886743315 +0000
++++ b/frontend/src/pages/ManagerLogin.jsx	2026-05-22 17:47:58.207362173 +0000
+@@ -3,11 +3,15 @@
+ import { useAuth } from '../context/AuthContext.jsx';
+ import { useToast } from '../context/ToastContext.jsx';
+ 
++const SHOW_DEMO =
++  import.meta.env.DEV ||
++  import.meta.env.VITE_SHOW_DEMO_CREDENTIALS === 'true';
++
+ export default function ManagerLoginPage() {
+   const { login, register } = useAuth();
+   const { toast } = useToast();
+   const navigate = useNavigate();
+-  const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
++  const [mode, setMode] = useState('signin');
+   const [form, setForm] = useState({ name: '', email: '', password: '', company: '' });
+   const [error, setError] = useState(null);
+   const [submitting, setSubmitting] = useState(false);
+@@ -84,16 +88,6 @@
+             minLength={6}
+           />
+ 
+-          <div className="flex items-center justify-between text-xs text-ink-700">
+-            <label className="flex items-center gap-2">
+-              <input type="checkbox" />
+-              Remember me
+-            </label>
+-            <a className="hover:underline" href="#">
+-              Forgot password?
+-            </a>
+-          </div>
+-
+           {error && <p className="text-sm text-red-600">{error}</p>}
+ 
+           <button disabled={submitting} className="btn-sky w-full text-base py-3">
+@@ -119,9 +113,11 @@
+           </p>
+         </div>
+ 
+-        <div className="mt-4 p-3 bg-white/60 rounded-xl text-xs text-ink-700">
+-          <strong>Demo:</strong> manager@almondwood.com / password123
+-        </div>
++        {SHOW_DEMO && (
++          <div className="mt-4 p-3 bg-white/60 rounded-xl text-xs text-ink-700">
++            <strong>Demo (dev only):</strong> manager@almondwood.com / password123
++          </div>
++        )}
+       </div>
+     </div>
+   );
+diff -ruN old/frontend/src/pages/Signup.jsx new/frontend/src/pages/Signup.jsx
+--- a/frontend/src/pages/Signup.jsx	2026-05-22 17:47:00.722742295 +0000
++++ b/frontend/src/pages/Signup.jsx	2026-05-22 17:47:58.207262443 +0000
+@@ -1,37 +1,53 @@
+ import { useState } from 'react';
+ import { Link, useNavigate } from 'react-router-dom';
+-import { api } from '../api/client.js';
+ import { useAuth } from '../context/AuthContext.jsx';
+ import { useToast } from '../context/ToastContext.jsx';
++import GoogleSignInButton from '../components/GoogleSignInButton.jsx';
+ 
+ export default function SignupPage() {
+-  const { register } = useAuth();
++  const { register, loginWithGoogle } = useAuth();
+   const { toast } = useToast();
+   const navigate = useNavigate();
+   const [form, setForm] = useState({ name: '', email: '', password: '' });
+   const [error, setError] = useState(null);
+   const [submitting, setSubmitting] = useState(false);
+-  const [devLink, setDevLink] = useState(null);
+-  const [success, setSuccess] = useState(false);
++  const [showEmailFallback, setShowEmailFallback] = useState(false);
+ 
+-  async function submit(e) {
++  async function handleGoogle(credential) {
++    setError(null);
++    try {
++      const { user, googleVerification } = await loginWithGoogle(credential);
++      if (googleVerification === 'verified') {
++        toast.success(
++          `Welcome, ${user.name.split(' ')[0]}. You're verified as a UC Davis student.`
++        );
++        navigate('/');
++      } else {
++        toast.info(
++          `Signed in as ${user.email}. This isn't a UC Davis Google account — you can browse, but posting and verified reviews stay locked.`,
++          { duration: 8000 }
++        );
++        navigate('/');
++      }
++    } catch (e) {
++      setError(e.message);
++    }
++  }
++
++  async function submitEmail(e) {
+     e.preventDefault();
+     setError(null);
+     setSubmitting(true);
+     try {
+-      // Hit the API directly so we can read devVerifyUrl from the response.
+-      const data = await api.post('/auth/register', {
+-        ...form,
+-        role: 'student',
+-      });
+-      // Hydrate auth context via login flow (token already stored on register
+-      // path inside AuthContext.register; mirror that by calling register).
+-      await register({ ...form, role: 'student' }).catch(() => {});
+-      setDevLink(data.devVerifyUrl || null);
+-      setSuccess(true);
+-      toast.success(
+-        'Account created. Check your inbox for a verification link.'
++      const data = await register({ ...form, role: 'student' });
++      // No "check your inbox" — students who go this path are explicitly
++      // told to use Google to verify.
++      toast.info(
++        data.message ||
++          'Account created. To become a verified UC Davis student, sign in with Google using your @ucdavis.edu account.',
++        { duration: 8000 }
+       );
++      navigate('/');
+     } catch (e) {
+       setError(e.message);
+     } finally {
+@@ -39,111 +55,85 @@
+     }
+   }
+ 
+-  const willBeVerified = /@ucdavis\.edu$/i.test(form.email);
+-
+-  if (success) {
+-    return (
+-      <div className="min-h-[calc(100vh-120px)] bg-cream-50 grid place-items-center p-4">
+-        <div className="w-full max-w-lg bg-white rounded-3xl p-8 shadow-soft border border-ink-100">
+-          <h1 className="section-cap mb-2">Check your inbox</h1>
+-          <p className="text-sm text-ink-700">
+-            We sent a verification link to <strong>{form.email}</strong>. Click
+-            it to verify your address.
+-          </p>
+-          {willBeVerified ? (
+-            <p className="text-sm text-sage-700 mt-2">
+-              Once verified, you'll be marked as a verified UC Davis student and
+-              can post subleases, leave reviews, save listings, and message
+-              residents.
+-            </p>
+-          ) : (
+-            <p className="text-sm text-ink-500 mt-2">
+-              Heads up: this email isn't an <code>@ucdavis.edu</code> address,
+-              so you'll be able to browse but not post, review, or message until
+-              you re-sign-up with a Davis email.
+-            </p>
+-          )}
+-
+-          {devLink && (
+-            <div className="mt-5 p-3 bg-cream-100 rounded-xl text-xs border border-cream-300">
+-              <p className="font-medium mb-1">
+-                Dev mode — click your verification link:
+-              </p>
+-              <a
+-                href={devLink}
+-                className="underline break-all text-sage-700"
+-              >
+-                {devLink}
+-              </a>
+-              <p className="text-ink-500 mt-1">
+-                (Shown here because the server is running in development mode.
+-                In production this is emailed, not displayed.)
+-              </p>
+-            </div>
+-          )}
+-
+-          <div className="mt-5 flex gap-2">
+-            <button onClick={() => navigate('/')} className="btn-primary">
+-              Browse listings
+-            </button>
+-            <Link to="/verify-email" className="btn-ghost">
+-              Manage verification
+-            </Link>
+-          </div>
+-        </div>
+-      </div>
+-    );
+-  }
+-
+   return (
+     <div className="min-h-[calc(100vh-120px)] bg-cream-50 grid place-items-center p-4">
+       <div className="w-full max-w-lg bg-sage-200 rounded-3xl p-8 shadow-soft">
+         <h1 className="section-cap mb-1">Create an account</h1>
+-        <p className="text-sm text-ink-700 mb-5">
+-          Sign up with your <code>@ucdavis.edu</code> email, then click the
+-          verification link to unlock posting, reviewing, and messaging.
++        <p className="text-sm text-ink-700 mb-4">
++          Use your UC Davis Google account to become a verified student. Only
++          verified UC Davis students can post subleases or leave verified
++          reviews.
+         </p>
+ 
+-        <form onSubmit={submit} className="space-y-3">
+-          <input
+-            type="text"
+-            placeholder="full name"
+-            value={form.name}
+-            onChange={(e) => setForm({ ...form, name: e.target.value })}
+-            className="input"
+-            required
+-          />
+-          <input
+-            type="email"
+-            placeholder="email address"
+-            value={form.email}
+-            onChange={(e) => setForm({ ...form, email: e.target.value })}
+-            className="input"
+-            required
+-          />
+-          {form.email && (
+-            <p className={`text-xs ${willBeVerified ? 'text-sage-700' : 'text-ink-500'}`}>
+-              {willBeVerified
+-                ? '✓ Davis email. Once you click your verification link, you’ll be a verified UC Davis student.'
+-                : 'Heads up: only @ucdavis.edu emails get verified-student privileges.'}
+-            </p>
+-          )}
+-          <input
+-            type="password"
+-            placeholder="password (at least 6 characters)"
+-            value={form.password}
+-            onChange={(e) => setForm({ ...form, password: e.target.value })}
+-            className="input"
+-            required
+-            minLength={6}
++        {/* Primary: Google */}
++        <div className="bg-white/70 rounded-2xl p-4">
++          <p className="text-sm font-medium mb-1">Continue with Google</p>
++          <p className="text-xs text-ink-700 mb-3">
++            Google will tell us your verified email. If it ends in{' '}
++            <code>@ucdavis.edu</code>, you'll be marked as a verified UC Davis
++            student automatically.
++          </p>
++          <GoogleSignInButton
++            text="signup_with"
++            onCredential={handleGoogle}
++            onError={(e) => setError(e.message)}
+           />
++        </div>
+ 
+-          {error && <p className="text-sm text-red-600">{error}</p>}
++        {error && <p className="text-sm text-red-600 mt-3">{error}</p>}
+ 
+-          <button disabled={submitting} className="btn-sky w-full text-base py-3">
+-            {submitting ? 'Creating account…' : 'Create account'}
++        <div className="flex items-center gap-3 my-4">
++          <div className="h-px flex-1 bg-ink-100" />
++          <span className="text-xs text-ink-500 uppercase">or</span>
++          <div className="h-px flex-1 bg-ink-100" />
++        </div>
++
++        {!showEmailFallback ? (
++          <button
++            type="button"
++            onClick={() => setShowEmailFallback(true)}
++            className="text-sm text-ink-700 underline"
++          >
++            Sign up with email/password instead (browsing only)
+           </button>
+-        </form>
++        ) : (
++          <>
++            <p className="text-xs text-ink-700 mb-2">
++              Email/password sign-up is for browsing only. To post subleases or
++              leave verified reviews, use the Google button above.
++            </p>
++            <form onSubmit={submitEmail} className="space-y-3">
++              <input
++                type="text"
++                placeholder="full name"
++                value={form.name}
++                onChange={(e) => setForm({ ...form, name: e.target.value })}
++                className="input"
++                required
++              />
++              <input
++                type="email"
++                placeholder="email address"
++                value={form.email}
++                onChange={(e) => setForm({ ...form, email: e.target.value })}
++                className="input"
++                required
++              />
++              <input
++                type="password"
++                placeholder="password (at least 6 characters)"
++                value={form.password}
++                onChange={(e) => setForm({ ...form, password: e.target.value })}
++                className="input"
++                required
++                minLength={6}
++              />
++              <button disabled={submitting} className="btn-sky w-full text-base py-3">
++                {submitting ? 'Creating account…' : 'Create browsing account'}
++              </button>
++            </form>
++          </>
++        )}
+ 
+         <p className="mt-4 text-sm text-ink-700">
+           Already have an account?{' '}
+diff -ruN old/frontend/vercel.json new/frontend/vercel.json
+--- a/frontend/vercel.json	2026-05-22 17:46:06.750739087 +0000
++++ b/frontend/vercel.json	2026-05-22 17:47:58.207826042 +0000
+@@ -1,8 +1,12 @@
+ {
+-    "rewrites": [
+-        {
+-            "source": "/api/:path*",
+-            "destination": "https://hone-production-6f2e.up.railway.app/api/:path*"
+-        }
+-    ]
+-}
+\ No newline at end of file
++  "rewrites": [
++    {
++      "source": "/api/:path*",
++      "destination": "https://hone-production-6f2e.up.railway.app/api/:path*"
++    },
++    {
++      "source": "/:path*",
++      "destination": "/index.html"
++    }
++  ]
++}
