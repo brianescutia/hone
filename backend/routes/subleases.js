@@ -45,7 +45,7 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // POST /api/subleases — create (verified student only)
-router.post('/', writeLimiter, requireVerifiedStudent, async (req, res, next) => {
+router.post('/', writeLimiter, requireAuth, requireVerifiedStudent, async (req, res, next) => {
   try {
     const errors = validateSubleaseInput(req.body);
     if (errors.length) {

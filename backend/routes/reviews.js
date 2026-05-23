@@ -1,7 +1,7 @@
 const express = require('express');
 const Review = require('../models/Review');
 const Listing = require('../models/Listing');
-const { requireVerifiedStudent } = require('../middleware/auth');
+const { requireAuth, requireVerifiedStudent } = require('../middleware/auth');
 const { writeLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
@@ -19,7 +19,7 @@ async function recomputeListingRating(listingId) {
 }
 
 // POST /api/reviews — verified student creates a review
-router.post('/', writeLimiter, requireVerifiedStudent, async (req, res, next) => {
+router.post('/', writeLimiter, requireAuth, requireVerifiedStudent, async (req, res, next) => {
   try {
     const listing = await Listing.findById(req.body.listing);
     if (!listing) return res.status(400).json({ error: 'Listing not found' });
