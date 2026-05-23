@@ -76,6 +76,12 @@ export default function SafetyPage() {
         student.
       </p>
       <p>
+        If you can't find the item to report — or if the problem isn't tied
+        to a specific listing — use the{' '}
+        <a href="/report-problem" className="underline">Report a problem</a>{' '}
+        page instead.
+      </p>
+      <p>
         If you've already been scammed and money was involved, also file a
         report with the{' '}
         <a

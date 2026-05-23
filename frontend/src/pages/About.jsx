@@ -1,4 +1,5 @@
 import StaticPage from '../components/StaticPage.jsx';
+import { SupportEmail } from '../lib/support.jsx';
 
 export default function AboutPage() {
   return (
@@ -55,8 +56,8 @@ export default function AboutPage() {
       <p>
         Built by students, for students. If you spot a bug, want to suggest a
         feature, or run an apartment complex near Davis and want to claim
-        your listing, email <strong>admin@hone.local</strong> (replace with
-        your real address before launch).
+        your listing, email <SupportEmail subject="hone — hello" /> or use
+        the <strong>Report a problem</strong> link in the footer.
       </p>
     </StaticPage>
   );

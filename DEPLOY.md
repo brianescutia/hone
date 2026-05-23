@@ -1,143 +1,193 @@
-# Deploying hone
+# hone deploy guide
 
-This guide walks through a production deployment using free or near-free tiers:
-
-- **Database:** MongoDB Atlas (free tier)
-- **Backend:** Render (free web service) — Railway and Fly.io work the same way
-- **Frontend:** Vercel (free hobby)
-
-Total cost: $0 for low traffic. Expect ~30 minutes for the first deploy.
+Concrete, opinionated steps for shipping the current beta to UC Davis
+students. This is meant to be **followed in order** the first time you
+deploy. After that, the **Checklist** at the bottom is the short version
+for follow-up deploys.
 
 ---
 
-## 1. MongoDB Atlas
+## 1. Provision infra (one time)
 
-1. Sign up at <https://www.mongodb.com/cloud/atlas/register> and create an organization.
-2. **Build a Database** → pick the free **M0** tier, any cloud, region close to your backend.
-3. **Database Access** → **Add New Database User**. Username and a strong password — copy them somewhere safe.
-4. **Network Access** → **Add IP Address**. For first setup, allow `0.0.0.0/0` ("anywhere"). Tighten later by adding your backend host's egress IPs only.
-5. **Database** → **Connect** → **Drivers** → **Node.js**. Copy the SRV URI; it looks like:
+You need three accounts: **MongoDB Atlas**, **Railway**, **Vercel**, plus a
+Google Cloud project for OAuth and (optionally) **Resend** for email.
 
-   ```
-   mongodb+srv://USER:<password>@cluster0.example.mongodb.net/?retryWrites=true&w=majority
-   ```
+### MongoDB Atlas
+- Create an `M0`/free cluster.
+- Database user with a strong password.
+- Under **Network Access**, allow Railway's egress (or `0.0.0.0/0` while
+  iterating — tighten later).
+- Copy the SRV connection string. This is `MONGO_URI`.
 
-   Replace `<password>` with the real one, and add `/hone` before the `?` so the URI ends with `/hone?retryWrites=…`. That's your `MONGO_URI`.
+### Google OAuth
+- console.cloud.google.com → APIs & Services → Credentials → **OAuth 2.0
+  Client ID**, Web application.
+- Authorized JavaScript origins:
+  - `https://hone-olive.vercel.app` (and any custom domain)
+  - `http://localhost:5173` (for dev)
+- Authorized redirect URIs: leave the Railway callback URL in too, even
+  though the ID-token flow doesn't strictly need it.
+- Copy the Client ID and Client Secret.
+
+### Resend (optional but recommended)
+- Get an API key.
+- Verify a domain in the Resend dashboard. `EMAIL_FROM` must use that
+  domain (e.g. `hone <no-reply@your-domain.com>`).
 
 ---
 
-## 2. Seed the production DB (once)
+## 2. Backend env vars (Railway)
 
-The first time, you need to run the seed script against Atlas so demo data and demo accounts exist. Do it locally:
+Set these in **Railway → your service → Variables**. None of these go in
+git.
+
+| Var | Required | Value |
+|---|---|---|
+| `NODE_ENV` | yes | `production` |
+| `JWT_SECRET` | yes | 48+ random hex chars. `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` |
+| `MONGO_URI` | yes | Atlas SRV string |
+| `GOOGLE_CLIENT_ID` | yes | from Google Cloud |
+| `GOOGLE_CLIENT_SECRET` | yes | from Google Cloud |
+| `CLIENT_ORIGIN` | yes | comma-separated, e.g. `https://hone-olive.vercel.app,https://yourcustom.com` |
+| `ALLOW_VERCEL_PREVIEWS` | no | `false` for prod; `true` if you actively use preview deploys |
+| `SUPPORT_EMAIL` | yes | A real, monitored email. **Do not leave as `admin@hone.local`.** |
+| `AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES` | yes | `true` for private beta after first wave is reviewed manually |
+| `MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES` | yes | `true` once first round of manager edits is reviewed |
+| `SEED_DEMO_DATA` | yes | **`false`** for production |
+| `RESEND_API_KEY` | recommended | from Resend |
+| `EMAIL_FROM` | recommended | `hone <no-reply@your-domain.com>` |
+| `APIFY_TOKEN` | no | only if you plan to use external imports |
+
+> **Refusal-to-boot safety nets.** The backend refuses to start in
+> production if `JWT_SECRET` is missing/short or `MONGO_URI` is missing. It
+> warns if `GOOGLE_CLIENT_ID` is missing.
+
+---
+
+## 3. Frontend env vars (Vercel)
+
+Set these in **Vercel → Project → Settings → Environment Variables**.
+Vite inlines `VITE_*` vars at build time, so you must redeploy after
+changing them.
+
+| Var | Required | Value |
+|---|---|---|
+| `VITE_API_BASE_URL` | yes | `https://hone-production-6f2e.up.railway.app/api` (or your Railway URL) |
+| `VITE_GOOGLE_CLIENT_ID` | yes | same as backend's `GOOGLE_CLIENT_ID` |
+| `VITE_SUPPORT_EMAIL` | yes | same address as backend's `SUPPORT_EMAIL` |
+| `VITE_SHOW_DEMO_CREDENTIALS` | yes | **`false`** for production |
+
+The Contact/Privacy/Terms/About pages all read `VITE_SUPPORT_EMAIL` and
+silently hide the support email line in production if it's not set or is
+set to a `.local` / `example.com` placeholder. Setting a real address is
+how that line shows up.
+
+---
+
+## 4. First-deploy bootstrap
+
+After Railway is up but before public launch:
 
 ```bash
-cd backend
-MONGO_URI="mongodb+srv://USER:PASS@cluster0.example.mongodb.net/hone?retryWrites=true&w=majority" \
-JWT_SECRET="anything_for_seed_script" \
-npm run seed
+# Locally with prod MONGO_URI in your shell:
+ADMIN_EMAIL='you@your-real-domain.com' \
+ADMIN_PASSWORD='<a long random string, save in a password manager>' \
+ADMIN_NAME='Your Name' \
+MONGO_URI='<prod-uri>' \
+JWT_SECRET='<prod-secret>' \
+node backend/scripts/createAdmin.js
 ```
 
-You should see `[seed] done`. Skip this step if you'd rather start with an empty database.
+This creates exactly one admin account. Demo seed data is **not** loaded
+in production unless `SEED_DEMO_DATA=true`.
 
 ---
 
-## 3. Backend on Render
+## 5. Security cleanup before public launch
 
-1. Push your code to GitHub.
-2. Go to <https://dashboard.render.com> → **New +** → **Web Service** → connect your repo.
-3. Settings:
-   - **Root directory:** `backend`
-   - **Build command:** `npm install`
-   - **Start command:** `npm start`
-   - **Instance type:** Free
-4. **Environment** tab → add the variables from `backend/.env.production.example`:
-   - `NODE_ENV=production`
-   - `JWT_SECRET` — generate with `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
-   - `MONGO_URI` — from step 1
-   - `CLIENT_ORIGINS` — leave blank for now; come back after step 4
-5. Deploy. Once it's live, note the URL — e.g. `https://hone-api.onrender.com`.
-6. Health check: `curl https://hone-api.onrender.com/api/health` should return `{"ok":true}`.
+Do all of these before you tell more than a small private beta about hone.
 
-> **Render free-tier note:** the service sleeps after 15 minutes of inactivity. First request after sleep takes ~30 seconds to cold-boot. Fine for student demos; upgrade or move to Railway/Fly.io if that's a problem.
-
-**Railway and Fly.io** work identically — point at the `backend` folder, set the same env vars, deploy.
-
----
-
-## 4. Frontend on Vercel
-
-1. Same GitHub repo. Go to <https://vercel.com/new> → import the repo.
-2. Settings:
-   - **Root directory:** `frontend`
-   - **Framework preset:** Vite (auto-detected)
-   - **Build command:** `npm run build` (default)
-   - **Output directory:** `dist` (default)
-3. **Environment Variables** → add:
-   - `VITE_API_BASE=https://hone-api.onrender.com/api` (from step 3)
-4. Deploy. Vercel gives you a URL like `https://hone.vercel.app`.
+- [ ] **Rotate `JWT_SECRET`** to a value no one outside you has seen. Every
+      currently-signed-in user will be logged out — that's fine for a
+      private beta.
+- [ ] **Remove or change every demo password.** The seed data uses
+      `password123`; that exists for in-memory dev only. Use
+      `scripts/createAdmin.js` to set real admin credentials.
+- [ ] **`SEED_DEMO_DATA=false`** in Railway. Confirm by checking the
+      Railway logs on startup don't say "seeding production-style DB".
+- [ ] **`VITE_SHOW_DEMO_CREDENTIALS=false`** in Vercel. Confirm by
+      visiting `/login` and `/manager-login` — the "Demo (dev only)" box
+      must not appear.
+- [ ] **`SUPPORT_EMAIL` and `VITE_SUPPORT_EMAIL`** point at a real,
+      monitored mailbox — not `admin@hone.local`.
+- [ ] **CORS origins** in `CLIENT_ORIGIN` match exactly what the browser
+      sends. No trailing slashes, no http:// vs https:// mismatches.
+- [ ] **`.env` files are git-ignored.** `git check-ignore -v backend/.env`
+      must say so. They are; this is a "trust but verify" line.
+- [ ] **No secrets logged.** Backend logs the host of `MONGO_URI` but not
+      credentials; it never logs JWTs or the Google client secret. Skim
+      a real production log to confirm.
+- [ ] **Google OAuth origins** include the production frontend URL.
+- [ ] **MongoDB Atlas IP allowlist** is at least as tight as
+      "everywhere" — ideally only Railway egress IPs.
 
 ---
 
-## 5. Connect CORS
+## 6. Build and deploy
 
-Back to Render → your backend service → **Environment**:
+Backend (Railway) auto-deploys from `main` by default. To trigger:
 
-- Set `CLIENT_ORIGINS=https://hone.vercel.app,https://your-custom-domain.com`
-- Optionally set `ALLOW_VERCEL_PREVIEWS=true` so PR preview deploys also work
-- Save → Render redeploys automatically
+```bash
+git push origin main
+```
 
-Open your Vercel URL in a private window. Sign in with the seeded demo account — if you see listings, CORS is good.
+Frontend (Vercel) auto-deploys from `main` by default. To trigger
+manually:
 
----
+```bash
+# from frontend/
+vercel --prod
+```
 
-## 6. Custom domain (optional)
-
-- **Frontend:** Vercel → Project → Domains → add `hone.app`, follow the DNS instructions.
-- **Backend:** Render → Service → Settings → Custom Domains → add `api.hone.app`.
-- Update `VITE_API_BASE` on Vercel to `https://api.hone.app/api` and `CLIENT_ORIGINS` on Render to your new frontend domain. Both services redeploy automatically.
-
----
-
-## 7. Set up Resend for real email
-
-Verification emails fall back to the server console if `RESEND_API_KEY` is missing — useful for dev, useless for real users.
-
-1. Sign up at <https://resend.com> (free tier: 100 emails/day).
-2. **Domains** → **Add Domain** → add the domain you'll send from (e.g. `hone.app`). Add the DNS records Resend gives you to your domain provider.
-3. **API Keys** → **Create API Key** → "Full access" or "Sending access". Copy the `re_…` value.
-4. On Render → backend service → **Environment**:
-   - `RESEND_API_KEY=re_...`
-   - `EMAIL_FROM=hone <no-reply@your-verified-domain.com>` — the `@` part must match the verified domain.
-5. Redeploy. Sign up with a real address you control. You should receive a real branded email.
-
-If sending fails in prod, the backend logs the Resend error and the signup response includes `emailDelivery: "live"` regardless — check Render logs.
+Or push to main.
 
 ---
 
-## 8. Going from "launchable" to "launched"
+## 7. External imports (Apify) — policy
 
-Things to do before publicizing the URL on a UC Davis subreddit or Discord:
+The Apify integration is NOT enabled in this pass. When you turn it on
+later, the rules below are non-negotiable:
 
-- [ ] **Rotate seed passwords.** Either remove the seed accounts from prod (`MONGO_URI` set → no auto-seed), or change `password123` on every seeded account.
-- [ ] **Replace `admin@hone.local`** in `frontend/src/pages/{About,Privacy,Terms,Safety}.jsx` and `backend/routes/auth.js` (suspension message) with a real address you'll monitor.
-- [ ] **Tighten Atlas Network Access.** Replace `0.0.0.0/0` with Render's egress IPs (Render → Service → Connect → Outbound IPs).
-- [ ] **Atlas backups.** The free tier doesn't include automatic backups; enable scheduled snapshots on M2+ or write a nightly `mongodump` cron.
-- [ ] **Add a real image upload pipeline.** The `ImagePreviewInput` component is structured so you can swap URL input for a Cloudinary/S3 uploader without changing call sites.
-- [ ] **Monitoring.** Sentry on the frontend and a log drain on Render — even free tiers catch the worst crashes.
-- [ ] **Test rate limits work.** From an incognito window, fail login 6 times → confirm 429 with friendly JSON error.
-- [ ] **Test the deletion flow.** Sign up a throwaway, post a sublease, hit "Delete my account" on the dashboard, confirm it's gone.
-- [ ] **(Optional) Apify.** If you'll use Apify imports, configure `APIFY_TOKEN` + actor IDs, run one test import, approve it through `/admin → external leads`, confirm the new listing renders with the "External lead — not verified" badge.
+- **Nothing scraped auto-publishes.** Every Apify item lands as an
+  `ExternalLead` with `status: 'needs_review'`. Admin reviews them in
+  the External Leads tab.
+- **Facebook Marketplace, Zillow, and similar imports must be
+  admin-reviewed before becoming visible Listings.** Approving a lead
+  creates a Listing draft with `sourceType: 'external_import'` and
+  `verificationStatus: 'unverified'`.
+- **Imported listings are labeled "External listing — not verified by
+  hone"** until a verified UC Davis student, an approved manager, or an
+  admin verifies the data.
+- **Managers can later claim imported listings through the normal claim
+  flow** — no separate path.
+- **Respect source terms and privacy.** Scraping Facebook Marketplace,
+  Zillow, Craigslist, etc. may violate their TOS and in some
+  jurisdictions implicates the CFAA or equivalent laws. Use Apify
+  imports as an internal moderator tool, not a real-time index. Strip
+  seller PII from the public-facing fields (the import service already
+  does this; do not bypass it).
 
 ---
 
-## Troubleshooting
+## Short checklist (every subsequent deploy)
 
-**"CORS: origin … not allowed"** — your `CLIENT_ORIGINS` env var doesn't include the frontend URL. No trailing slash. Re-save and wait for redeploy.
-
-**"Invalid email or password" on every login** — you didn't seed the prod DB (step 2), or you're hitting the wrong DB. Check `MONGO_URI` matches the cluster you seeded.
-
-**The frontend works locally but not in prod** — check the browser network tab. If requests are going to `localhost:5050`, your `VITE_API_BASE` env var wasn't set at build time. Trigger a rebuild on Vercel after setting it.
-
-**"JWT_SECRET must be set"** on Render boot — set the env var. The backend hard-fails in production if it's missing.
-
-**Render service sleeping** — free tier. Either accept the cold start, or upgrade to Render's $7/mo Starter plan, or move the backend to Railway/Fly.io.
+```
+[ ] CI / tests green (cd backend && npm test; cd ../frontend && npm run build)
+[ ] git push origin main
+[ ] Watch Railway logs for "[server] hone API listening"
+[ ] Watch Vercel deploy for green build
+[ ] Curl /api/health on the prod backend
+[ ] Hit /login as a verified student via Google
+[ ] Hit /manager as the demo manager account
+[ ] Hit /admin as your real admin account
+```

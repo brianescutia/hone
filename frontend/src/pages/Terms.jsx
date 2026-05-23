@@ -1,4 +1,5 @@
 import StaticPage from '../components/StaticPage.jsx';
+import { SupportEmail } from '../lib/support.jsx';
 
 export default function TermsPage() {
   return (
@@ -110,8 +111,8 @@ export default function TermsPage() {
 
       <h2 className="font-semibold text-lg pt-2">8. Contact</h2>
       <p>
-        Email <strong>admin@hone.local</strong> for anything related to
-        these terms.
+        Email <SupportEmail subject="hone — terms question" /> for anything
+        related to these terms.
       </p>
     </StaticPage>
   );

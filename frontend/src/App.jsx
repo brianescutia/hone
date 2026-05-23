@@ -20,6 +20,8 @@ import AboutPage from './pages/About.jsx';
 import PrivacyPage from './pages/Privacy.jsx';
 import TermsPage from './pages/Terms.jsx';
 import SafetyPage from './pages/Safety.jsx';
+import ContactPage from './pages/Contact.jsx';
+import ReportProblemPage from './pages/ReportProblem.jsx';
 
 export default function App() {
   const location = useLocation();
@@ -44,6 +46,8 @@ export default function App() {
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/safety" element={<SafetyPage />} />
+          <Route path="/contact" element={<ContactPage />} />
+          <Route path="/report-problem" element={<ReportProblemPage />} />
 
           <Route
             path="/dashboard"
