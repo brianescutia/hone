@@ -1,4 +1,5 @@
 import StaticPage from '../components/StaticPage.jsx';
+import { SupportEmail } from '../lib/support.jsx';
 
 export default function PrivacyPage() {
   return (
@@ -94,8 +95,12 @@ export default function PrivacyPage() {
 
       <h2 className="font-semibold text-lg pt-2">Deleting your account</h2>
       <p>
-        Email <strong>admin@hone.local</strong> from the address tied to your
-        account and ask us to delete it. We will:
+        Sign in and use the <strong>Delete my account</strong> button on
+        your dashboard (Danger zone) — that hard-deletes your profile,
+        subleases, reports, and conversations and anonymizes any reviews
+        you left (pass the wipe-reviews option to also delete those). If
+        you can't sign in, email <SupportEmail subject="hone — delete my account" />{' '}
+        from the address on the account. We will:
       </p>
       <ul className="list-disc list-inside space-y-2 ml-2">
         <li>Delete your user record (name, email, password hash, bio).</li>
@@ -120,7 +125,8 @@ export default function PrivacyPage() {
 
       <h2 className="font-semibold text-lg pt-2">Contact</h2>
       <p>
-        Questions? Email <strong>admin@hone.local</strong>.
+        Questions? Email <SupportEmail subject="hone — privacy question" />{' '}
+        or see the <a href="/contact" className="underline">Contact</a> page.
       </p>
     </StaticPage>
   );

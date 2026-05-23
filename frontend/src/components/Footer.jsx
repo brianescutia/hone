@@ -18,6 +18,12 @@ export default function Footer() {
           <Link to="/safety" className="hover:text-ink-900 hover:underline">
             Safety
           </Link>
+          <Link to="/contact" className="hover:text-ink-900 hover:underline">
+            Contact
+          </Link>
+          <Link to="/report-problem" className="hover:text-ink-900 hover:underline">
+            Report a problem
+          </Link>
           <Link to="/privacy" className="hover:text-ink-900 hover:underline">
             Privacy
           </Link>

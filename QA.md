@@ -1,123 +1,144 @@
-# QA.md — hone post-fix verification
+# hone manual QA checklist
 
-Run this list after deploying the changes in this PR. Each box should be checked off before announcing the launch.
+Walk this list after every deploy to production. The goal is not
+exhaustive coverage — it's catching regressions in the paths that, if
+broken, would make hone look amateur to a UC Davis student who heard
+about the private beta from a friend.
 
-## 1. Endpoints respond
-- [ ] `curl https://hone-production-6f2e.up.railway.app/api/health` → `{"ok":true}`
-- [ ] `curl https://hone-production-6f2e.up.railway.app/api/listings` → JSON with at least one listing
-- [ ] Visit `https://hone-olive.vercel.app/` → listings and map render
+Time budget: ~10 minutes.
 
-## 2. SPA refresh works
-Open each of these in a fresh tab (not via in-app navigation) and confirm the page renders (no 404):
-- [ ] `https://hone-olive.vercel.app/login`
-- [ ] `https://hone-olive.vercel.app/signup`
-- [ ] `https://hone-olive.vercel.app/dashboard`
-- [ ] `https://hone-olive.vercel.app/subleases/new`
-- [ ] `https://hone-olive.vercel.app/admin`
+---
 
-## 3. API routing from the browser
-Open DevTools → Network on `https://hone-olive.vercel.app/`. Reload.
-- [ ] Requests to `/api/listings` (or directly to Railway, depending on `VITE_API_BASE_URL`) return 200.
-- [ ] No 404s under any `/api/...` path.
-- [ ] No CORS errors in the console.
+## 0. Smoke
 
-## 4. Auth — Google OAuth
-- [ ] `/login` shows a "Continue with Google" button.
-- [ ] Helper text reads: "Use your UC Davis Google account to become a verified student" and "Only verified UC Davis students can post subleases or leave verified reviews."
-- [ ] Sign in with an `@ucdavis.edu` Google account → toast: "You're verified as a UC Davis student." Dashboard shows the Verified UC Davis student badge.
-- [ ] Sign in with a non-`@ucdavis.edu` Google account → toast: "this isn't a UC Davis Google account" — dashboard shows the "browsing only" notice. `studentVerified` is `false`.
-- [ ] Manually-typed `@ucdavis.edu` email/password signup does NOT mark `studentVerified`. (The new signup page tells them so directly.)
+- [ ] `GET https://<api>/api/health` returns `{ ok: true }` quickly (<1s).
+- [ ] Frontend home loads, map tiles render, listing cards render, no
+      console errors related to env vars.
+- [ ] No `VITE_*` is missing — open the network tab, confirm
+      `VITE_API_BASE_URL` produces real backend requests, not 404s on
+      `/api/...` relative paths.
+- [ ] `/login` and `/manager-login` do **not** show the "Demo (dev only)"
+      box.
 
-## 5. No fake email-verification dead ends
-- [ ] Signing up as a student with email/password no longer says "check your inbox" or "we sent a verification link."
-- [ ] The page that previously said it now says: "To become a verified UC Davis student, sign in with Google using your @ucdavis.edu account."
-- [ ] No "Resend verification email" button shown to students.
+## 1. Auth (Google)
 
-## 6. Protected actions still require `studentVerified`
-- [ ] Verified UC Davis student can `POST /api/subleases` (returns 201).
-- [ ] Unverified (or non-Davis-Google) account gets 403 on `POST /api/subleases`.
-- [ ] Verified UC Davis student can `POST /api/reviews`.
-- [ ] Unverified account gets 403 on `POST /api/reviews`.
-- [ ] None of the backend protected actions use `email.endsWith('@ucdavis.edu')` — only `studentVerified === true`.
+- [ ] `/login` → "Continue with Google" pops the Google account chooser.
+- [ ] Signing in with a `@ucdavis.edu` Google account lands you on `/`
+      with `Welcome, <name>. You're verified as a UC Davis student.`
+- [ ] Signing in with a non-Davis Google account shows the
+      "isn't a UC Davis Google account" toast. Posting is blocked.
+- [ ] `/auth/me` returns the user after a hard refresh (no flash of
+      logged-out state for >0.5s).
 
-## 7. Admin/manager not downgraded by Google sign-in
-- [ ] Sign an admin account in via Google with the same email → role stays `admin`, not demoted to `student`.
-- [ ] Sign an approved manager in via Google with the same email → role stays `manager`, `managerStatus` stays `approved`.
+## 2. Auth (email/password)
 
-## 8. CORS
-- [ ] Railway env has `CLIENT_ORIGIN=https://hone-olive.vercel.app` (or `CLIENT_ORIGINS=...`).
-- [ ] Cross-origin requests from `hone-olive.vercel.app` succeed.
-- [ ] Preflight `OPTIONS` requests return 204/200 with proper `Access-Control-Allow-*` headers.
-- [ ] Server logs show only `[cors] denied origin <foo>` for actually-disallowed origins — no full URI dumps.
+- [ ] `/login` accepts `admin@your-real-domain` + the password you set
+      via `createAdmin.js`. (Do **not** test demo passwords in prod.)
+- [ ] `/manager-login` lets a new manager apply; account lands in
+      `managerStatus: pending`.
 
-## 9. Security
-- [ ] Railway logs do NOT contain the full `MONGO_URI` string.
-- [ ] Railway logs show `[db] Connecting to MongoDB...` then `[db] Connected` — no credentials.
-- [ ] Demo credentials block does NOT appear on `/login` or `/manager-login` in production.
-- [ ] `VITE_SHOW_DEMO_CREDENTIALS` is unset (or `false`) on Vercel.
-- [ ] `SEED_DEMO_DATA` is `false` (or unset) on Railway.
+## 3. Browse + filter
 
-## 10. Smoke test summary
-```bash
-# Backend
-cd backend
-npm install
-PORT=0 npm test
+- [ ] Home page lists at least the seeded apartments (or the bootstrapped
+      Davis list if you ran the import script).
+- [ ] Search input filters by name.
+- [ ] Pills: price, bedrooms, rating, commute open popovers ABOVE the
+      map (not clipped).
+- [ ] On mobile, the filter pill row scrolls horizontally, popovers fit
+      on screen, and the list/map toggle works.
+- [ ] Empty state ("No listings match those filters") shows with a
+      visible "Clear all filters" button when filters return no results.
 
-# Frontend
-cd ../frontend
-npm install
-npm run build
-```
+## 4. Listing detail
 
-## 11. Auth persistence (added after Google-login null-user fix)
+- [ ] Photos render, or the placeholder card shows for listings without
+      photos.
+- [ ] Claim badge shows the right label:
+  - Almondwood → "Verified Property Manager" (demo only) OR
+    "Claimed by Property"
+  - All other seed listings → "Unclaimed listing" or the appropriate state
+- [ ] External import demo listing ("Greens at Cordova" in the seed) is
+      **not** visible to public users until verified.
+- [ ] Commute panel, expense calculator, reviews list all render.
+- [ ] Report button on a review opens the report dialog and submits.
 
-### 11a. Storage contains both keys after Google login
-- [ ] Sign in with an `@ucdavis.edu` Google account.
-- [ ] Open DevTools → Application → Local Storage → `https://hone-olive.vercel.app`.
-- [ ] `hone_token` is a JWT (three base64 segments joined by `.`).
-- [ ] `hone_user` is a JSON object containing at least `id`, `email`, `role`, `studentVerified: true`.
-- [ ] Same after email/password login. Same after register.
+## 5. Sublease post
 
-### 11b. Refresh keeps the user logged in
-- [ ] After login, hard-refresh (Cmd-Shift-R / Ctrl-Shift-R). Dashboard reloads with the same user — no "logged out" flash.
-- [ ] DevTools → Network shows one `GET /api/auth/me` returning 200. Response body has no `passwordHash`.
+- [ ] As a verified UC Davis student, `/subleases/new` renders.
+- [ ] Submit with `AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES=true`:
+      toast says "Your sublease is live."
+- [ ] Submit with the flag false: toast says "pending review" and the
+      sublease appears under `/admin/pending` → Subleases.
+- [ ] As an unverified student or signed-out user, the route bounces or
+      shows the verification gate.
+- [ ] Safety notice is visible on the form.
 
-### 11c. Verified student can post a sublease
-- [ ] As a verified student, fill out `/subleases/new` and submit.
-- [ ] `POST /api/subleases` returns 201. Toast: "Your sublease is pending review."
-- [ ] `Authorization: Bearer <hone_token>` was present on the request.
+## 6. Manager claim
 
-### 11d. Unverified user gets a clean 403
-- [ ] Sign up with a non-Davis email/password (or sign in via Google with a Gmail account).
-- [ ] Attempt `POST /api/subleases` (either via the form or via curl with their token).
-- [ ] Server returns 403. Frontend shows: "Only verified UC Davis students can post subleases."
-- [ ] User stays logged in (not bounced to /login).
+- [ ] Existing manager (`/manager`) sees their verified properties (if
+      any) and the pending/rejected claim history.
+- [ ] `/manager/claim-property?listing=<id>` pre-selects that listing.
+- [ ] Submitting a claim with `workEmail` on a free provider (gmail.com)
+      lands as `confidence: 'low'`.
+- [ ] Submitting with a `workEmail` whose domain matches `companyWebsite`
+      lands as `confidence: 'high'`.
+- [ ] Admin `/admin` → Pending tab → "Pending manager claims" shows the
+      claim card with confidence, reason, proof message, and both the
+      Approve and Reject buttons working.
+- [ ] After admin approves: the listing's `claimStatus` becomes
+      `claimed`, the manager's `verifiedManagerFor` includes the listing.
+- [ ] Approved manager can hit `/manager/listings/:id/edit` and save
+      changes (when `MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES=true`).
+- [ ] Manager cannot edit a listing they're not verified for: PATCH
+      returns 403.
 
-### 11e. Stale-token recovery
-This simulates what happens when JWT_SECRET rotates or the DB is reseeded.
+## 7. Admin tools
 
-- [ ] Open DevTools → Application → Local Storage. Confirm both `hone_token` and `hone_user` are set.
-- [ ] In the Console, run: `localStorage.setItem('hone_token', 'eyJ0eXAiOi.broken.token')`
-- [ ] Reload the page.
-- [ ] Expected: toast "Please sign in again." → redirect to `/login`. Local storage no longer contains `hone_token` or `hone_user`.
+- [ ] `/admin` Pending tab shows accurate counts for:
+  - Pending subleases
+  - Pending listings (external imports awaiting verification)
+  - Pending manager claims
+  - Open reports
+- [ ] Approve/reject buttons each succeed and re-fetch the queue.
+- [ ] External Leads tab: every imported lead is labeled "External lead
+      — not verified" and stays gated until admin acts on it.
+- [ ] Users tab: suspend/unsuspend toggles work.
+- [ ] Reports tab: resolving a report removes it from "open" count.
 
-Repeat with a token that's valid but for a deleted user (e.g., issued before a `seed.js` run):
-- [ ] `requireAuth` middleware sees `User.findById(payload.id) === null` and returns 401.
-- [ ] Global 401 handler in `api/client.js` fires the registered callback.
-- [ ] `AuthContext` clears `hone_token` + `hone_user`, toasts, navigates to `/login`.
+## 8. Trust/legal pages
 
-### 11f. Manual recovery still works
-- [ ] In Console: `localStorage.clear()` → reload → user is logged out cleanly (no console errors, no spinner).
-- [ ] Log back in via Google → both keys are restored.
+- [ ] Footer links to: About, Safety, Contact, Report a problem,
+      Privacy, Terms.
+- [ ] About/Privacy/Terms render the **real** support email (set via
+      `VITE_SUPPORT_EMAIL`). They must **not** show `admin@hone.local`
+      in production.
+- [ ] Contact page renders an "Email support" button that opens a
+      `mailto:` to the real address.
+- [ ] `/report-problem` as a signed-out user shows the "sign in to
+      report" prompt.
+- [ ] `/report-problem` as a signed-in user submits a report.
+- [ ] Safety page links to `/report-problem`.
 
-## 12. /auth/me endpoint contract
-```bash
-TOKEN="..."  # paste from localStorage
-curl -i https://hone-production-6f2e.up.railway.app/api/auth/me                                # → 401
-curl -i -H "Authorization: Bearer bogus" https://hone-production-6f2e.up.railway.app/api/auth/me   # → 401
-curl -i -H "Authorization: Bearer $TOKEN" https://hone-production-6f2e.up.railway.app/api/auth/me  # → 200 { "user": {...} }
-```
-- [ ] 200 response body has `user.id`, `user.email`, `user.role`, `user.studentVerified`.
-- [ ] 200 response body does NOT contain `passwordHash`, `googleId`, or `emailVerifyTokenHash`.
+## 9. Account deletion
 
+- [ ] Dashboard "Delete my account" button works on a throwaway student
+      account; you are logged out and the user record is gone from the DB.
+- [ ] "Delete + wipe reviews" also removes the user's reviews.
+- [ ] Admin accounts cannot self-delete: the API returns 403.
+
+## 10. Security spot-checks
+
+- [ ] In a Railway log line, search for "mongodb+srv" — the URI itself
+      must NOT appear. The log says `[db] Connecting to MongoDB...`,
+      nothing more.
+- [ ] JWTs do not appear in any log line.
+- [ ] `view-source:` on the frontend — confirm `VITE_GOOGLE_CLIENT_ID` is
+      the only Google value visible. The server's `GOOGLE_CLIENT_SECRET`
+      must NOT appear.
+- [ ] `.env` files are not committed: `git ls-files | grep -i env` only
+      shows `.example` files.
+
+---
+
+If anything fails this list, **don't tell more students about hone
+yet**. Roll the fix, redeploy, walk the list again.
