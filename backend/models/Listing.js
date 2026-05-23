@@ -61,6 +61,27 @@ const ListingSchema = new mongoose.Schema(
     manager: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     claimable: { type: Boolean, default: true },
 
+    // ---- New manager-claim fields ----
+    // True iff an approved ManagerClaim exists for this listing.
+    claimedByManager: { type: Boolean, default: false, index: true },
+    // The User whose claim is currently active. May be null even when
+    // claimedByManager=false (e.g., during revocation).
+    claimedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
+    // Approved claim's confidence ≥ medium AND domain match was at least medium.
+    managerVerified: { type: Boolean, default: false },
+    // Snapshot of the website domain from the approved claim (for UI display
+    // and future verification audits).
+    officialManagerDomain: { type: String, default: '' },
+    // Granular state for the public UI: 'unclaimed' | 'pending' | 'claimed'.
+    claimStatus: {
+      type: String,
+      enum: ['unclaimed', 'pending', 'claimed'],
+      default: 'unclaimed',
+      index: true,
+    },
+    // Last time the (approved) manager edited any official field on this listing.
+    lastManagerUpdateAt: { type: Date, default: null },
+
     // ---- Source tracking & verification ----
     // Where did this listing come from?
     sourceType: {

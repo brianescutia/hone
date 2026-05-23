@@ -133,6 +133,7 @@ async function start() {
   app.use('/api/reviews', require('./routes/reviews'));
   app.use('/api/conversations', require('./routes/conversations'));
   app.use('/api/claims', require('./routes/claims'));
+  app.use('/api/manager-claims', require('./routes/managerClaims'));
   app.use('/api/reports', require('./routes/reports'));
   app.use('/api/users', require('./routes/users'));
   app.use('/api/admin', require('./routes/admin'));
@@ -149,6 +150,11 @@ async function start() {
     console.log(`[server] CORS allowed origins: ${allowed.join(', ')}`);
     console.log(
       `[server] Google sign-in: ${process.env.GOOGLE_CLIENT_ID ? 'enabled' : 'DISABLED'}`
+    );
+    console.log(
+      `[server] Feature flags: ` +
+        `AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES=${process.env.AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES || 'false'}, ` +
+        `MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES=${process.env.MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES || 'false'}`
     );
   });
 

@@ -1,0 +1,1749 @@
+diff -ruN a/backend/.env.example b/backend/.env.example
+--- a/backend/.env.example	2026-05-23 14:43:57.145244059 +0000
++++ b/backend/.env.example	2026-05-23 14:47:41.201241949 +0000
+@@ -48,6 +48,19 @@
+ # (only useful for staging — leave 'false' for public-facing prod).
+ SEED_DEMO_DATA=false
+ 
++# ---- Feature flags (manager/property claim system) ----
++# When true, sublease posts from verified UC Davis students bypass the
++# moderation queue and go live immediately. Off by default so a
++# moderator can vet the first wave of student posts. Recommended for
++# production: true (after the first wave is reviewed manually).
++AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES=false
++
++# When true, a verified manager's edits to their claimed listing are
++# applied immediately (no second admin review per edit). Off by default —
++# admin should vet the first round of manager-driven edits, then flip
++# this on. Recommended for production: true.
++MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES=false
++
+ # ---- External imports (Apify) — optional, not used in this pass ----
+ APIFY_TOKEN=
+ APIFY_FACEBOOK_MARKETPLACE_ACTOR_ID=
+diff -ruN a/backend/middleware/auth.js b/backend/middleware/auth.js
+--- a/backend/middleware/auth.js	2026-05-23 14:44:08.417243953 +0000
++++ b/backend/middleware/auth.js	2026-05-23 14:48:10.329241675 +0000
+@@ -58,4 +58,39 @@
+   next();
+ }
+ 
+-module.exports = { requireAuth, attachUser, requireRole, requireVerifiedStudent };
++// Guard for PATCH /listings/:id and similar manager-only edits.
++//
++// Allows the request iff:
++//   1. req.user is a manager AND
++//   2. req.user.verifiedManagerFor includes req.params[paramName]
++//
++// Returns 401 if not authed, 403 otherwise. Admins are deliberately NOT
++// short-circuited here — admins should use the admin-only endpoints.
++function requireVerifiedManagerOfListing(paramName = 'id') {
++  return (req, res, next) => {
++    if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
++    if (req.user.role !== 'manager')
++      return res.status(403).json({ error: 'Manager account required.' });
++
++    const listingId = req.params[paramName];
++    if (!listingId)
++      return res.status(400).json({ error: 'Listing id missing in URL.' });
++
++    const verifiedFor = (req.user.verifiedManagerFor || []).map(String);
++    if (!verifiedFor.includes(String(listingId))) {
++      return res.status(403).json({
++        error:
++          'You can only edit listings you have a verified manager claim for. Submit a claim and wait for admin approval.',
++      });
++    }
++    next();
++  };
++}
++
++module.exports = {
++  requireAuth,
++  attachUser,
++  requireRole,
++  requireVerifiedStudent,
++  requireVerifiedManagerOfListing,
++};
+diff -ruN a/backend/models/Listing.js b/backend/models/Listing.js
+--- a/backend/models/Listing.js	2026-05-23 14:44:22.393243821 +0000
++++ b/backend/models/Listing.js	2026-05-23 14:48:28.965241499 +0000
+@@ -61,6 +61,27 @@
+     manager: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+     claimable: { type: Boolean, default: true },
+ 
++    // ---- New manager-claim fields ----
++    // True iff an approved ManagerClaim exists for this listing.
++    claimedByManager: { type: Boolean, default: false, index: true },
++    // The User whose claim is currently active. May be null even when
++    // claimedByManager=false (e.g., during revocation).
++    claimedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
++    // Approved claim's confidence ≥ medium AND domain match was at least medium.
++    managerVerified: { type: Boolean, default: false },
++    // Snapshot of the website domain from the approved claim (for UI display
++    // and future verification audits).
++    officialManagerDomain: { type: String, default: '' },
++    // Granular state for the public UI: 'unclaimed' | 'pending' | 'claimed'.
++    claimStatus: {
++      type: String,
++      enum: ['unclaimed', 'pending', 'claimed'],
++      default: 'unclaimed',
++      index: true,
++    },
++    // Last time the (approved) manager edited any official field on this listing.
++    lastManagerUpdateAt: { type: Date, default: null },
++
+     // ---- Source tracking & verification ----
+     // Where did this listing come from?
+     sourceType: {
+diff -ruN a/backend/models/ManagerClaim.js b/backend/models/ManagerClaim.js
+--- a/backend/models/ManagerClaim.js	1970-01-01 00:00:00.000000000 +0000
++++ b/backend/models/ManagerClaim.js	2026-05-23 14:49:01.353241194 +0000
+@@ -0,0 +1,75 @@
++const mongoose = require('mongoose');
++
++const ManagerClaimSchema = new mongoose.Schema(
++  {
++    manager: {
++      type: mongoose.Schema.Types.ObjectId,
++      ref: 'User',
++      required: true,
++      index: true,
++    },
++    listing: {
++      type: mongoose.Schema.Types.ObjectId,
++      ref: 'Listing',
++      required: true,
++      index: true,
++    },
++    propertyName: { type: String, default: '' },
++
++    // ---- Identity-bearing fields used for confidence scoring ----
++    workEmail: { type: String, required: true, trim: true, lowercase: true },
++    emailDomain: { type: String, default: '', lowercase: true, index: true },
++    companyWebsite: { type: String, default: '', trim: true },
++    websiteDomain: { type: String, default: '', lowercase: true },
++    phoneNumber: { type: String, default: '' },
++    roleTitle: { type: String, default: '' },
++    proofMessage: { type: String, default: '' },
++
++    confidence: {
++      type: String,
++      enum: ['high', 'medium', 'low'],
++      default: 'low',
++      index: true,
++    },
++    confidenceReason: { type: String, default: '' },
++
++    status: {
++      type: String,
++      enum: ['pending', 'approved', 'rejected', 'revoked'],
++      default: 'pending',
++      index: true,
++    },
++    adminNote: { type: String, default: '' },
++    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
++    reviewedAt: { type: Date, default: null },
++  },
++  { timestamps: true }
++);
++
++// One open claim per (manager, listing) is enforced in the route layer.
++ManagerClaimSchema.index({ manager: 1, listing: 1, status: 1 });
++
++ManagerClaimSchema.methods.toPublicJSON = function () {
++  return {
++    id: this._id,
++    manager: this.manager,
++    listing: this.listing,
++    propertyName: this.propertyName,
++    workEmail: this.workEmail,
++    emailDomain: this.emailDomain,
++    companyWebsite: this.companyWebsite,
++    websiteDomain: this.websiteDomain,
++    phoneNumber: this.phoneNumber,
++    roleTitle: this.roleTitle,
++    proofMessage: this.proofMessage,
++    confidence: this.confidence,
++    confidenceReason: this.confidenceReason,
++    status: this.status,
++    adminNote: this.adminNote,
++    reviewedAt: this.reviewedAt,
++    createdAt: this.createdAt,
++    updatedAt: this.updatedAt,
++  };
++};
++
++module.exports = mongoose.model('ManagerClaim', ManagerClaimSchema);
+diff -ruN a/backend/models/User.js b/backend/models/User.js
+--- a/backend/models/User.js	2026-05-23 14:44:40.829243648 +0000
++++ b/backend/models/User.js	2026-05-23 14:48:49.977241301 +0000
+@@ -62,6 +62,15 @@
+       enum: ['pending', 'approved', 'rejected'],
+       default: 'pending',
+     },
++    // Listings this manager has SUBMITTED a claim for (any status).
++    // Useful for "your claim is pending" UI.
++    claimedListings: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Listing' }],
++    // Listings this manager has been APPROVED for. Source of truth for
++    // "can this manager edit this listing?" — see requireVerifiedManagerOfListing.
++    verifiedManagerFor: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Listing' }],
++    workEmail: { type: String, default: '', lowercase: true, trim: true },
++    managerDomain: { type: String, default: '', lowercase: true },
++    managerVerifiedAt: { type: Date, default: null },
+ 
+     // ---- Student-only fields ----
+     savedListings: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Listing' }],
+@@ -132,6 +141,11 @@
+     suspended: this.suspended,
+     company: this.company,
+     managerStatus: this.managerStatus,
++    claimedListings: this.claimedListings,
++    verifiedManagerFor: this.verifiedManagerFor,
++    workEmail: this.workEmail,
++    managerDomain: this.managerDomain,
++    managerVerifiedAt: this.managerVerifiedAt,
+     savedListings: this.savedListings,
+     bio: this.bio,
+     avatarUrl: this.avatarUrl,
+diff -ruN a/backend/routes/admin.js b/backend/routes/admin.js
+--- a/backend/routes/admin.js	2026-05-23 14:45:31.405243171 +0000
++++ b/backend/routes/admin.js	2026-05-23 14:51:46.213239642 +0000
+@@ -1,6 +1,7 @@
+ const express = require('express');
+ const Sublease = require('../models/Sublease');
+ const ClaimRequest = require('../models/ClaimRequest');
++const ManagerClaim = require('../models/ManagerClaim');
+ const Review = require('../models/Review');
+ const Report = require('../models/Report');
+ const User = require('../models/User');
+@@ -21,19 +22,23 @@
+ // GET /api/admin/pending — everything awaiting review
+ router.get('/pending', async (_req, res, next) => {
+   try {
+-    const [subleases, claims, reports, listings] = await Promise.all([
++    const [subleases, claims, managerClaims, reports, listings] = await Promise.all([
+       Sublease.find({ moderation: 'pending' })
+         .populate('listing', 'name')
+         .populate('poster', 'name email studentVerified verificationStatus'),
+       ClaimRequest.find({ status: 'pending' })
+         .populate('listing', 'name')
+         .populate('manager', 'name email company'),
++      ManagerClaim.find({ status: 'pending' })
++        .populate('listing', 'name address claimStatus')
++        .populate('manager', 'name email role company')
++        .sort({ createdAt: -1 }),
+       Report.find({ status: 'open' })
+         .populate('reporter', 'name email')
+         .sort({ createdAt: -1 }),
+       Listing.find({ verificationStatus: 'pending_review' }),
+     ]);
+-    res.json({ subleases, claims, reports, listings });
++    res.json({ subleases, claims, managerClaims, reports, listings });
+   } catch (err) {
+     next(err);
+   }
+@@ -84,6 +89,8 @@
+   }
+ });
+ 
++// ---------- Legacy ClaimRequest endpoints (kept for back-compat) ----------
++
+ // PATCH /api/admin/claims/:id/approve — approve manager claim, attach listing
+ router.patch('/claims/:id/approve', async (req, res, next) => {
+   try {
+@@ -119,6 +126,206 @@
+   }
+ });
+ 
++// ---------- New ManagerClaim endpoints ----------
++
++// GET /api/admin/manager-claims?status=pending
++router.get('/manager-claims', async (req, res, next) => {
++  try {
++    const filter = {};
++    if (req.query.status) filter.status = req.query.status;
++    const claims = await ManagerClaim.find(filter)
++      .populate('listing', 'name address claimStatus claimedByManager photos')
++      .populate('manager', 'name email role company')
++      .populate('reviewedBy', 'name email')
++      .sort({ createdAt: -1 })
++      .limit(500);
++    res.json({ claims });
++  } catch (err) {
++    next(err);
++  }
++});
++
++// PATCH /api/admin/manager-claims/:id/approve
++router.patch('/manager-claims/:id/approve', async (req, res, next) => {
++  try {
++    const claim = await ManagerClaim.findById(req.params.id);
++    if (!claim) return res.status(404).json({ error: 'Claim not found' });
++    if (claim.status === 'approved')
++      return res.status(409).json({ error: 'Claim is already approved.' });
++
++    const listing = await Listing.findById(claim.listing);
++    if (!listing) return res.status(404).json({ error: 'Underlying listing not found.' });
++
++    // Refuse if a *different* approved manager already holds this listing.
++    if (
++      listing.claimedByManager &&
++      listing.claimedBy &&
++      !listing.claimedBy.equals(claim.manager)
++    ) {
++      return res.status(409).json({
++        error:
++          'Another manager already has an approved claim on this listing. Revoke it first.',
++      });
++    }
++
++    claim.status = 'approved';
++    claim.reviewedBy = req.user._id;
++    claim.reviewedAt = new Date();
++    if (req.body.adminNote) claim.adminNote = req.body.adminNote;
++    await claim.save();
++
++    listing.claimedByManager = true;
++    listing.claimedBy = claim.manager;
++    listing.manager = claim.manager; // legacy field
++    listing.claimable = false;
++    listing.claimStatus = 'claimed';
++    listing.verificationStatus = 'claimed';
++    listing.managerVerified = claim.confidence !== 'low';
++    listing.officialManagerDomain = claim.websiteDomain || '';
++    await listing.save();
++
++    const user = await User.findById(claim.manager);
++    if (user) {
++      const ids = new Set((user.verifiedManagerFor || []).map(String));
++      ids.add(String(listing._id));
++      user.verifiedManagerFor = Array.from(ids);
++      if (!(user.claimedListings || []).some((id) => id.equals(listing._id))) {
++        user.claimedListings.push(listing._id);
++      }
++      user.managerStatus = 'approved';
++      user.managerVerifiedAt = new Date();
++      if (!user.managerDomain && claim.emailDomain) user.managerDomain = claim.emailDomain;
++      if (!user.workEmail && claim.workEmail) user.workEmail = claim.workEmail;
++      if (!user.company && claim.propertyName) user.company = claim.propertyName;
++      await user.save();
++    }
++
++    // Auto-reject any other pending claims from OTHER managers for this listing.
++    await ManagerClaim.updateMany(
++      {
++        listing: listing._id,
++        status: 'pending',
++        _id: { $ne: claim._id },
++        manager: { $ne: claim.manager },
++      },
++      {
++        $set: {
++          status: 'rejected',
++          adminNote: 'Auto-rejected: another claim was approved for this listing.',
++          reviewedBy: req.user._id,
++          reviewedAt: new Date(),
++        },
++      }
++    );
++
++    res.json({ claim, listing });
++  } catch (err) {
++    next(err);
++  }
++});
++
++// PATCH /api/admin/manager-claims/:id/reject
++router.patch('/manager-claims/:id/reject', async (req, res, next) => {
++  try {
++    const claim = await ManagerClaim.findById(req.params.id);
++    if (!claim) return res.status(404).json({ error: 'Claim not found' });
++    claim.status = 'rejected';
++    claim.adminNote = req.body.adminNote || '';
++    claim.reviewedBy = req.user._id;
++    claim.reviewedAt = new Date();
++    await claim.save();
++
++    // If this was the only pending claim, clear the listing's pending state.
++    const listing = await Listing.findById(claim.listing);
++    if (listing && listing.claimStatus === 'pending') {
++      const otherPending = await ManagerClaim.countDocuments({
++        listing: listing._id,
++        status: 'pending',
++      });
++      if (!otherPending && !listing.claimedByManager) {
++        listing.claimStatus = 'unclaimed';
++        await listing.save();
++      }
++    }
++
++    res.json({ claim });
++  } catch (err) {
++    next(err);
++  }
++});
++
++// POST /api/admin/listings/:id/revoke-claim — strip a manager's claim on
++// a listing. The ManagerClaim record is marked 'revoked' for audit.
++router.post('/listings/:id/revoke-claim', async (req, res, next) => {
++  try {
++    const listing = await Listing.findById(req.params.id);
++    if (!listing) return res.status(404).json({ error: 'Listing not found' });
++    const previousClaimedBy = listing.claimedBy;
++
++    listing.claimedByManager = false;
++    listing.claimedBy = null;
++    listing.manager = null;
++    listing.claimable = true;
++    listing.claimStatus = 'unclaimed';
++    listing.managerVerified = false;
++    listing.officialManagerDomain = '';
++    if (listing.verificationStatus === 'claimed') listing.verificationStatus = 'verified';
++    await listing.save();
++
++    if (previousClaimedBy) {
++      const u = await User.findById(previousClaimedBy);
++      if (u) {
++        u.verifiedManagerFor = (u.verifiedManagerFor || []).filter(
++          (id) => !id.equals(listing._id)
++        );
++        await u.save();
++      }
++    }
++
++    await ManagerClaim.updateMany(
++      { listing: listing._id, status: 'approved' },
++      {
++        $set: {
++          status: 'revoked',
++          adminNote: req.body.reason || 'Claim revoked by admin.',
++          reviewedBy: req.user._id,
++          reviewedAt: new Date(),
++        },
++      }
++    );
++
++    res.json({ listing });
++  } catch (err) {
++    next(err);
++  }
++});
++
++// GET /api/admin/claimed-listings — all currently-claimed listings
++router.get('/claimed-listings', async (_req, res, next) => {
++  try {
++    const listings = await Listing.find({ claimedByManager: true })
++      .populate('claimedBy', 'name email company workEmail managerDomain')
++      .sort({ lastManagerUpdateAt: -1, updatedAt: -1 });
++    res.json({ listings });
++  } catch (err) {
++    next(err);
++  }
++});
++
++// GET /api/admin/manager-updates — listings recently edited by their manager
++router.get('/manager-updates', async (req, res, next) => {
++  try {
++    const limit = Math.min(Number(req.query.limit) || 50, 200);
++    const listings = await Listing.find({ lastManagerUpdateAt: { $ne: null } })
++      .populate('claimedBy', 'name email')
++      .sort({ lastManagerUpdateAt: -1 })
++      .limit(limit);
++    res.json({ listings });
++  } catch (err) {
++    next(err);
++  }
++});
++
+ // PATCH /api/admin/reviews/:id/remove
+ router.patch('/reviews/:id/remove', async (req, res, next) => {
+   try {
+@@ -222,7 +429,9 @@
+ // GET /api/admin/listings
+ router.get('/listings', async (_req, res, next) => {
+   try {
+-    const listings = await Listing.find().populate('manager', 'name email');
++    const listings = await Listing.find()
++      .populate('manager', 'name email')
++      .populate('claimedBy', 'name email');
+     res.json({ listings });
+   } catch (err) {
+     next(err);
+diff -ruN a/backend/routes/listings.js b/backend/routes/listings.js
+--- a/backend/routes/listings.js	2026-05-23 14:45:47.493243020 +0000
++++ b/backend/routes/listings.js	2026-05-23 14:50:30.673240353 +0000
+@@ -2,7 +2,12 @@
+ const Listing = require('../models/Listing');
+ const Sublease = require('../models/Sublease');
+ const Review = require('../models/Review');
+-const { attachUser, requireAuth } = require('../middleware/auth');
++const {
++  attachUser,
++  requireAuth,
++  requireVerifiedManagerOfListing,
++} = require('../middleware/auth');
++const { writeLimiter } = require('../middleware/rateLimit');
+ 
+ const router = express.Router();
+ 
+@@ -54,7 +59,8 @@
+ // GET /api/listings/:id
+ router.get('/:id', attachUser, async (req, res, next) => {
+   try {
+-    const listing = await Listing.findById(req.params.id);
++    const listing = await Listing.findById(req.params.id)
++      .populate('claimedBy', 'name company');
+     if (!listing) return res.status(404).json({ error: 'Listing not found' });
+ 
+     const [subleases, reviews, similar] = await Promise.all([
+@@ -99,4 +105,85 @@
+   }
+ });
+ 
++// ---------------------------------------------------------------------------
++// PATCH /api/listings/:id — manager edits to a claimed listing
++//
++// Only verified managers of THIS listing can call it (enforced by
++// requireVerifiedManagerOfListing). Even then, only an allowlisted set of
++// fields can be touched — no flipping verificationStatus, no swapping
++// sourceType, no reassigning claimedBy.
++//
++// If MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES is true, the edit is
++// applied immediately and `lastManagerUpdateAt` is bumped. Otherwise the
++// route returns 503 (no "pending edits" table in this pass).
++// ---------------------------------------------------------------------------
++
++const MANAGER_EDITABLE_FIELDS = new Set([
++  'priceMin',
++  'priceMax',
++  'bedroomsMin',
++  'bedroomsMax',
++  'bathroomsMin',
++  'bathroomsMax',
++  'amenities',
++  'keyAmenities',
++  'feesAndPolicies',
++  'tags',
++  'photos',
++  'description',
++  'sourceUrl', // official property website
++  'contactEmail',
++  'contactPhone',
++  'officeHours',
++  'petFriendly',
++  'floorPlans',
++]);
++
++router.patch(
++  '/:id',
++  writeLimiter,
++  requireAuth,
++  requireVerifiedManagerOfListing('id'),
++  async (req, res, next) => {
++    try {
++      const autoApprove =
++        String(process.env.MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES || '')
++          .toLowerCase() === 'true';
++      if (!autoApprove) {
++        return res.status(503).json({
++          error:
++            'Manager edits are disabled on this deployment. Ask an admin to enable MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES.',
++        });
++      }
++
++      const listing = await Listing.findById(req.params.id);
++      if (!listing) return res.status(404).json({ error: 'Listing not found' });
++
++      const updates = {};
++      for (const [k, v] of Object.entries(req.body || {})) {
++        if (MANAGER_EDITABLE_FIELDS.has(k)) updates[k] = v;
++      }
++      if (Object.keys(updates).length === 0) {
++        return res.status(400).json({
++          error:
++            'No editable fields supplied. Editable: ' +
++            Array.from(MANAGER_EDITABLE_FIELDS).join(', '),
++        });
++      }
++
++      Object.assign(listing, updates);
++      listing.lastManagerUpdateAt = new Date();
++      await listing.save();
++
++      res.json({
++        listing,
++        editedFields: Object.keys(updates),
++        autoApproved: true,
++      });
++    } catch (err) {
++      next(err);
++    }
++  }
++);
++
+ module.exports = router;
+diff -ruN a/backend/routes/managerClaims.js b/backend/routes/managerClaims.js
+--- a/backend/routes/managerClaims.js	1970-01-01 00:00:00.000000000 +0000
++++ b/backend/routes/managerClaims.js	2026-05-23 14:49:43.005240802 +0000
+@@ -0,0 +1,132 @@
++const express = require('express');
++const ManagerClaim = require('../models/ManagerClaim');
++const Listing = require('../models/Listing');
++const { requireAuth, requireRole } = require('../middleware/auth');
++const { writeLimiter } = require('../middleware/rateLimit');
++const { scoreClaim } = require('../services/domainConfidence');
++
++const router = express.Router();
++
++function validateClaimInput(b) {
++  const errs = [];
++  if (!b.listingId) errs.push('listingId is required.');
++  if (!b.workEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(b.workEmail)))
++    errs.push('A valid work email is required.');
++  if (b.companyWebsite && !/^https?:\/\//i.test(String(b.companyWebsite)))
++    errs.push('Company website must start with http:// or https://');
++  if (b.proofMessage && String(b.proofMessage).length > 4000)
++    errs.push('Proof message is too long (max 4000 chars).');
++  return errs;
++}
++
++// POST /api/manager-claims
++//
++// Body: { listingId, workEmail, companyWebsite?, phoneNumber?, roleTitle?,
++//         proofMessage?, propertyName? }
++//
++// Always lands in status: 'pending'. Confidence is computed and stored
++// for the admin to see, but does NOT auto-approve — first claim on any
++// listing always requires an admin review.
++router.post(
++  '/',
++  writeLimiter,
++  requireAuth,
++  requireRole('manager'),
++  async (req, res, next) => {
++    try {
++      const errors = validateClaimInput(req.body);
++      if (errors.length)
++        return res.status(400).json({ error: errors.join(' '), fields: errors });
++
++      const listing = await Listing.findById(req.body.listingId);
++      if (!listing) return res.status(404).json({ error: 'Listing not found' });
++
++      // Block double-claims: if already claimed by someone else, refuse.
++      if (
++        listing.claimedByManager &&
++        listing.claimedBy &&
++        !listing.claimedBy.equals(req.user._id)
++      ) {
++        return res.status(409).json({
++          error: 'This listing is already claimed by another manager.',
++        });
++      }
++
++      // One open claim per (manager, listing).
++      const openExisting = await ManagerClaim.findOne({
++        manager: req.user._id,
++        listing: listing._id,
++        status: 'pending',
++      });
++      if (openExisting) {
++        return res.status(409).json({
++          error: 'You already have a pending claim on this listing.',
++          claim: openExisting.toPublicJSON(),
++        });
++      }
++
++      const scored = scoreClaim({
++        workEmail: req.body.workEmail,
++        companyWebsite: req.body.companyWebsite,
++      });
++
++      const claim = await ManagerClaim.create({
++        manager: req.user._id,
++        listing: listing._id,
++        propertyName: req.body.propertyName || listing.name,
++        workEmail: String(req.body.workEmail).toLowerCase().trim(),
++        emailDomain: scored.emailDomain || '',
++        companyWebsite: req.body.companyWebsite || '',
++        websiteDomain: scored.websiteDomain || '',
++        phoneNumber: req.body.phoneNumber || '',
++        roleTitle: req.body.roleTitle || '',
++        proofMessage: req.body.proofMessage || '',
++        confidence: scored.confidence,
++        confidenceReason: scored.reason,
++        status: 'pending',
++      });
++
++      // Track on the listing so a "claim pending" badge can render publicly.
++      if (listing.claimStatus === 'unclaimed') {
++        listing.claimStatus = 'pending';
++        await listing.save();
++      }
++
++      // Track on the user so the dashboard can show "your claims".
++      if (!req.user.claimedListings.some((id) => id.equals(listing._id))) {
++        req.user.claimedListings.push(listing._id);
++        if (!req.user.workEmail && scored.emailDomain) req.user.workEmail = req.body.workEmail;
++        if (!req.user.managerDomain && scored.emailDomain) req.user.managerDomain = scored.emailDomain;
++        await req.user.save();
++      }
++
++      res.status(201).json({
++        claim: claim.toPublicJSON(),
++        message:
++          'Claim submitted. An admin will review it shortly. Confidence: ' +
++          scored.confidence + '. ' + scored.reason,
++      });
++    } catch (err) {
++      next(err);
++    }
++  }
++);
++
++// GET /api/manager-claims/mine — the calling manager's own claims
++router.get('/mine', requireAuth, requireRole('manager'), async (req, res, next) => {
++  try {
++    const claims = await ManagerClaim.find({ manager: req.user._id })
++      .populate('listing', 'name address photos claimStatus claimedByManager')
++      .sort({ createdAt: -1 });
++    res.json({
++      claims: claims.map((c) => ({
++        ...c.toPublicJSON(),
++        listing: c.listing,
++      })),
++    });
++  } catch (err) {
++    next(err);
++  }
++});
++
++module.exports = router;
+diff -ruN a/backend/routes/subleases.js b/backend/routes/subleases.js
+--- a/backend/routes/subleases.js	2026-05-23 14:46:07.025242836 +0000
++++ b/backend/routes/subleases.js	2026-05-23 14:50:05.617240589 +0000
+@@ -44,6 +44,14 @@
+   }
+ });
+ 
++// Auto-approval gate. Verified UC Davis students get their subleases
++// published immediately iff the operator has set the env flag. We never
++// auto-approve unverified posts, regardless of the flag.
++function shouldAutoApprove(user) {
++  if (!user || user.role !== 'student' || !user.studentVerified) return false;
++  return String(process.env.AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES || '').toLowerCase() === 'true';
++}
++
+ // POST /api/subleases — create (verified student only)
+ router.post('/', writeLimiter, requireAuth, requireVerifiedStudent, async (req, res, next) => {
+   try {
+@@ -55,15 +63,18 @@
+     const listing = await Listing.findById(req.body.listing);
+     if (!listing) return res.status(400).json({ error: 'Listing not found' });
+ 
++    const autoApproved = shouldAutoApprove(req.user);
+     const sub = await Sublease.create({
+       ...req.body,
+       poster: req.user._id,
+-      moderation: 'pending',
++      moderation: autoApproved ? 'approved' : 'pending',
+     });
+     res.status(201).json({
+       sublease: sub,
+-      message:
+-        'Your sublease is pending review. An admin will approve it shortly, then it will appear publicly.',
++      autoApproved,
++      message: autoApproved
++        ? 'Your sublease is live. (Verified UC Davis students post directly.)'
++        : 'Your sublease is pending review. An admin will approve it shortly, then it will appear publicly.',
+     });
+   } catch (err) {
+     next(err);
+@@ -128,6 +139,7 @@
+   try {
+     const sub = await Sublease.findById(req.params.id);
+     if (!sub) return res.status(404).json({ error: 'Sublease not found' });
++    // Managers cannot delete student subleases. Only the poster or an admin.
+     if (!sub.poster.equals(req.user._id) && req.user.role !== 'admin')
+       return res.status(403).json({ error: 'Not your sublease' });
+ 
+diff -ruN a/backend/server.js b/backend/server.js
+--- a/backend/server.js	2026-05-23 14:46:31.813242603 +0000
++++ b/backend/server.js	2026-05-23 14:52:13.129239388 +0000
+@@ -133,6 +133,7 @@
+   app.use('/api/reviews', require('./routes/reviews'));
+   app.use('/api/conversations', require('./routes/conversations'));
+   app.use('/api/claims', require('./routes/claims'));
++  app.use('/api/manager-claims', require('./routes/managerClaims'));
+   app.use('/api/reports', require('./routes/reports'));
+   app.use('/api/users', require('./routes/users'));
+   app.use('/api/admin', require('./routes/admin'));
+@@ -150,6 +151,11 @@
+     console.log(
+       `[server] Google sign-in: ${process.env.GOOGLE_CLIENT_ID ? 'enabled' : 'DISABLED'}`
+     );
++    console.log(
++      `[server] Feature flags: ` +
++        `AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES=${process.env.AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES || 'false'}, ` +
++        `MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES=${process.env.MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES || 'false'}`
++    );
+   });
+ 
+   return server;
+diff -ruN a/backend/services/domainConfidence.js b/backend/services/domainConfidence.js
+--- a/backend/services/domainConfidence.js	1970-01-01 00:00:00.000000000 +0000
++++ b/backend/services/domainConfidence.js	2026-05-23 14:49:23.701240984 +0000
+@@ -0,0 +1,165 @@
++// Computes a confidence score for a manager claim by comparing the work
++// email domain to the property website domain.
++//
++// All inputs are tolerant — bad/missing values just slide to lower
++// confidence. Never throws.
++
++const FREE_PROVIDERS = new Set([
++  'gmail.com', 'googlemail.com',
++  'yahoo.com', 'ymail.com',
++  'outlook.com', 'hotmail.com', 'live.com', 'msn.com',
++  'proton.me', 'protonmail.com', 'pm.me',
++  'icloud.com', 'me.com', 'mac.com',
++  'aol.com', 'aim.com',
++  'fastmail.com', 'fastmail.fm',
++  'gmx.com', 'gmx.us',
++  'mail.com', 'zoho.com', 'tutanota.com', 'tutanota.de',
++  'duck.com', 'hey.com',
++]);
++
++// Suffixes we strip when reducing a hostname to its registrable domain.
++// Not a full Public Suffix List, just the common ones we'll see.
++const MULTI_PART_TLDS = new Set([
++  'co.uk', 'co.nz', 'co.jp', 'co.in', 'co.kr', 'co.za',
++  'com.au', 'com.br', 'com.mx', 'com.sg',
++  'ac.uk', 'gov.uk', 'org.uk',
++]);
++
++function normalizeHost(h) {
++  if (!h || typeof h !== 'string') return null;
++  let s = h.trim().toLowerCase();
++  s = s.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
++  s = s.replace(/[:?#].*$/, '');
++  s = s.replace(/^www\./, '');
++  return s || null;
++}
++
++function extractEmailDomain(email) {
++  if (!email || typeof email !== 'string') return null;
++  const at = email.indexOf('@');
++  if (at < 0 || at === email.length - 1) return null;
++  return normalizeHost(email.slice(at + 1));
++}
++
++function extractWebsiteDomain(url) {
++  return normalizeHost(url);
++}
++
++// Reduce host to its registrable domain. example.com → example.com,
++// foo.example.com → example.com, foo.example.co.uk → example.co.uk.
++function registrableDomain(host) {
++  if (!host) return null;
++  const parts = host.split('.');
++  if (parts.length < 2) return host;
++  const lastTwo = parts.slice(-2).join('.');
++  const lastThree = parts.length >= 3 ? parts.slice(-3).join('.') : null;
++  if (lastThree && MULTI_PART_TLDS.has(lastTwo)) return lastThree;
++  return lastTwo;
++}
++
++function isFreeProvider(domain) {
++  if (!domain) return false;
++  return FREE_PROVIDERS.has(domain) || FREE_PROVIDERS.has(registrableDomain(domain));
++}
++
++// Two domains are "related" if they share a registrable domain, or one
++// contains the other as a substring of length ≥ 4 (to avoid bogus
++// matches on common short words).
++function areRelated(emailDomain, siteDomain) {
++  if (!emailDomain || !siteDomain) return false;
++  if (emailDomain === siteDomain) return true;
++  const eReg = registrableDomain(emailDomain);
++  const sReg = registrableDomain(siteDomain);
++  if (eReg && sReg && eReg === sReg) return true;
++
++  const eLabel = (eReg || emailDomain).split('.')[0];
++  const sLabel = (sReg || siteDomain).split('.')[0];
++  if (eLabel && sLabel && eLabel.length >= 4 && sLabel.length >= 4) {
++    if (eLabel === sLabel) return true;
++    if (eLabel.includes(sLabel) || sLabel.includes(eLabel)) return true;
++  }
++  return false;
++}
++
++function scoreClaim({ workEmail, companyWebsite } = {}) {
++  const emailDomain = extractEmailDomain(workEmail);
++  const websiteDomain = extractWebsiteDomain(companyWebsite);
++  const free = isFreeProvider(emailDomain);
++
++  if (free) {
++    return {
++      confidence: 'low',
++      emailDomain,
++      websiteDomain,
++      emailIsFreeProvider: true,
++      domainsMatchExactly: false,
++      reason: 'Work email uses a free/personal email provider.',
++    };
++  }
++
++  if (!emailDomain) {
++    return {
++      confidence: 'low',
++      emailDomain: null,
++      websiteDomain,
++      emailIsFreeProvider: false,
++      domainsMatchExactly: false,
++      reason: 'No work email provided.',
++    };
++  }
++
++  if (!websiteDomain) {
++    return {
++      confidence: 'medium',
++      emailDomain,
++      websiteDomain: null,
++      emailIsFreeProvider: false,
++      domainsMatchExactly: false,
++      reason: 'Work email is on a business domain, but no property website was provided to verify against.',
++    };
++  }
++
++  const exact =
++    emailDomain === websiteDomain ||
++    registrableDomain(emailDomain) === registrableDomain(websiteDomain);
++
++  if (exact) {
++    return {
++      confidence: 'high',
++      emailDomain,
++      websiteDomain,
++      emailIsFreeProvider: false,
++      domainsMatchExactly: true,
++      reason: 'Work email domain matches the property website domain.',
++    };
++  }
++
++  if (areRelated(emailDomain, websiteDomain)) {
++    return {
++      confidence: 'medium',
++      emailDomain,
++      websiteDomain,
++      emailIsFreeProvider: false,
++      domainsMatchExactly: false,
++      reason: 'Work email domain is related to (but not an exact match for) the property website domain.',
++    };
++  }
++
++  return {
++    confidence: 'low',
++    emailDomain,
++    websiteDomain,
++    emailIsFreeProvider: false,
++    domainsMatchExactly: false,
++    reason: 'Work email domain does not match the property website domain.',
++  };
++}
++
++module.exports = {
++  scoreClaim,
++  extractEmailDomain,
++  extractWebsiteDomain,
++  registrableDomain,
++  isFreeProvider,
++  FREE_PROVIDERS,
++};
+diff -ruN a/frontend/src/App.jsx b/frontend/src/App.jsx
+--- a/frontend/src/App.jsx	2026-05-23 14:46:46.865242461 +0000
++++ b/frontend/src/App.jsx	2026-05-23 14:52:33.193239199 +0000
+@@ -13,6 +13,8 @@
+ import SubleaseFormPage from './pages/SubleaseForm.jsx';
+ import MessagesPage from './pages/Messages.jsx';
+ import ManagerDashboardPage from './pages/ManagerDashboard.jsx';
++import ClaimListingPage from './pages/ClaimListing.jsx';
++import EditClaimedListingPage from './pages/EditClaimedListing.jsx';
+ import AdminDashboardPage from './pages/AdminDashboard.jsx';
+ import AboutPage from './pages/About.jsx';
+ import PrivacyPage from './pages/Privacy.jsx';
+@@ -83,6 +85,22 @@
+               </ProtectedRoute>
+             }
+           />
++          <Route
++            path="/manager/claim-property"
++            element={
++              <ProtectedRoute roles={['manager']}>
++                <ClaimListingPage />
++              </ProtectedRoute>
++            }
++          />
++          <Route
++            path="/manager/listings/:id/edit"
++            element={
++              <ProtectedRoute roles={['manager']}>
++                <EditClaimedListingPage />
++              </ProtectedRoute>
++            }
++          />
+           <Route
+             path="/admin"
+             element={
+diff -ruN a/frontend/src/components/ListingClaimBadge.jsx b/frontend/src/components/ListingClaimBadge.jsx
+--- a/frontend/src/components/ListingClaimBadge.jsx	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/components/ListingClaimBadge.jsx	2026-05-23 14:54:16.257238228 +0000
+@@ -0,0 +1,71 @@
++// Drop-in badge for the public listing card / detail page. Reads the
++// listing's claim fields and renders the right label per the product spec:
++//
++//   - claimedByManager + managerVerified  → "Verified Property Manager"
++//   - claimedByManager only                → "Claimed by Property"
++//   - claimStatus = 'pending'              → "Claim pending review"
++//   - sourceType = 'external_import'       → "External listing — not verified by hone"
++//   - default (unclaimed)                  → "Unclaimed listing"
++//
++// Usage:
++//   <ListingClaimBadge listing={listing} />
++
++export default function ListingClaimBadge({ listing, className = '' }) {
++  if (!listing) return null;
++
++  if (listing.sourceType === 'external_import' && !listing.claimedByManager) {
++    return (
++      <span className={`chip bg-cream-200 text-ink-700 ${className}`} title="Imported from an external source. Verify details with the property before contacting.">
++        External listing — not verified by hone
++      </span>
++    );
++  }
++
++  if (listing.claimedByManager && listing.managerVerified) {
++    return (
++      <span className={`chip bg-sage-200 ${className}`} title="A property manager has verified ownership of this listing and edits official details directly.">
++        Verified Property Manager
++      </span>
++    );
++  }
++
++  if (listing.claimedByManager) {
++    return (
++      <span className={`chip bg-sage-200 ${className}`} title="A property manager has claimed this listing.">
++        Claimed by Property
++      </span>
++    );
++  }
++
++  if (listing.claimStatus === 'pending') {
++    return (
++      <span className={`chip bg-cream-200 ${className}`} title="A manager has submitted a claim for this listing. An admin is reviewing it.">
++        Claim pending review
++      </span>
++    );
++  }
++
++  return (
++    <span className={`chip bg-cream-100 text-ink-500 ${className}`} title="No property manager has verified this listing. Info comes from public records and reviews.">
++      Unclaimed listing
++    </span>
++  );
++}
++
++// Field-level helper: label a value as official (property-provided) or
++// community (student-provided). Use sparingly — overusing it is noisy.
++export function OfficialFieldLabel({ children = 'Property-provided', className = '' }) {
++  return (
++    <span className={`text-[10px] uppercase tracking-wide text-sage-700 ${className}`}>
++      {children}
++    </span>
++  );
++}
++
++export function CommunityFieldLabel({ children = 'Student-provided', className = '' }) {
++  return (
++    <span className={`text-[10px] uppercase tracking-wide text-ink-500 ${className}`}>
++      {children}
++    </span>
++  );
++}
+diff -ruN a/frontend/src/pages/ClaimListing.jsx b/frontend/src/pages/ClaimListing.jsx
+--- a/frontend/src/pages/ClaimListing.jsx	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/pages/ClaimListing.jsx	2026-05-23 14:54:42.293237983 +0000
+@@ -0,0 +1,207 @@
++import { useEffect, useState } from 'react';
++import { Link, useNavigate, useSearchParams } from 'react-router-dom';
++import { api } from '../api/client.js';
++import { useAuth } from '../context/AuthContext.jsx';
++import { useToast } from '../context/ToastContext.jsx';
++
++export default function ClaimListingPage() {
++  const { user } = useAuth();
++  const { toast } = useToast();
++  const navigate = useNavigate();
++  const [params] = useSearchParams();
++  const preselected = params.get('listing');
++
++  const [listings, setListings] = useState([]);
++  const [form, setForm] = useState({
++    listingId: preselected || '',
++    propertyName: '',
++    workEmail: '',
++    companyWebsite: '',
++    phoneNumber: '',
++    roleTitle: '',
++    proofMessage: '',
++  });
++  const [submitting, setSubmitting] = useState(false);
++  const [error, setError] = useState(null);
++  const [result, setResult] = useState(null);
++
++  useEffect(() => {
++    api.get('/listings')
++      .then(({ listings }) => setListings(listings))
++      .catch((err) => toast.error(err.message));
++  }, [toast]);
++
++  if (!user) {
++    return (
++      <div className="max-w-2xl mx-auto p-6">
++        <h1 className="section-cap">Claim a property</h1>
++        <p className="text-sm text-ink-500 mt-2">
++          Please <Link to="/manager-login" className="underline">sign in as a manager</Link> first.
++        </p>
++      </div>
++    );
++  }
++  if (user.role !== 'manager') {
++    return (
++      <div className="max-w-2xl mx-auto p-6">
++        <h1 className="section-cap">Claim a property</h1>
++        <p className="text-sm text-ink-500 mt-2">
++          Property claims are for managers/leasing offices. If you're a UC Davis student,
++          you don't need to claim a property — your <code>@ucdavis.edu</code> Google sign-in
++          already verifies you.
++        </p>
++      </div>
++    );
++  }
++
++  function update(k, v) {
++    setForm((f) => ({ ...f, [k]: v }));
++  }
++
++  async function submit(e) {
++    e.preventDefault();
++    setError(null);
++    setSubmitting(true);
++    try {
++      const data = await api.post('/manager-claims', form);
++      setResult(data);
++      toast.success('Claim submitted. An admin will review it shortly.');
++    } catch (err) {
++      if (err.status === 401) return; // global handler takes over
++      setError(err.message);
++    } finally {
++      setSubmitting(false);
++    }
++  }
++
++  if (result) {
++    return (
++      <div className="max-w-2xl mx-auto p-6">
++        <h1 className="section-cap">Claim submitted</h1>
++        <div className="card p-4 mt-3">
++          <p className="text-sm">
++            Your claim for <strong>{result.claim.propertyName}</strong> is pending admin review.
++          </p>
++          <p className="text-xs text-ink-500 mt-2">
++            Confidence: <strong>{result.claim.confidence}</strong>. {result.claim.confidenceReason}
++          </p>
++          <p className="text-xs text-ink-500 mt-2">
++            We'll email you when an admin makes a decision. You can also check the status
++            on your <Link to="/manager" className="underline">manager dashboard</Link>.
++          </p>
++        </div>
++      </div>
++    );
++  }
++
++  return (
++    <div className="max-w-2xl mx-auto p-4 sm:p-6">
++      <h1 className="section-cap mb-1">Claim a property</h1>
++      <p className="text-sm text-ink-500 mb-4">
++        Verify that you manage this property. We score claims by checking whether your
++        work email domain matches the property's website. <strong>High-confidence claims
++        still require admin review</strong> — they just get reviewed faster.
++      </p>
++
++      <form onSubmit={submit} className="space-y-3">
++        <Field label="Listing to claim">
++          <select
++            value={form.listingId}
++            onChange={(e) => update('listingId', e.target.value)}
++            className="input"
++            required
++          >
++            <option value="">Choose a property…</option>
++            {listings.map((l) => (
++              <option key={l._id} value={l._id} disabled={l.claimedByManager}>
++                {l.name} {l.claimedByManager ? ' (already claimed)' : ''}
++              </option>
++            ))}
++          </select>
++        </Field>
++
++        <Field label="Property name (as you'd like it displayed)">
++          <input
++            type="text"
++            value={form.propertyName}
++            onChange={(e) => update('propertyName', e.target.value)}
++            className="input"
++            placeholder="e.g. Almondwood Apartments"
++          />
++        </Field>
++
++        <Field label="Work email" hint="Use your business email — gmail/outlook/yahoo will score 'low confidence'.">
++          <input
++            type="email"
++            value={form.workEmail}
++            onChange={(e) => update('workEmail', e.target.value)}
++            className="input"
++            placeholder="leasing@yourproperty.com"
++            required
++          />
++        </Field>
++
++        <Field label="Property website" hint="Helps us cross-reference your work email domain.">
++          <input
++            type="url"
++            value={form.companyWebsite}
++            onChange={(e) => update('companyWebsite', e.target.value)}
++            className="input"
++            placeholder="https://www.yourproperty.com"
++          />
++        </Field>
++
++        <div className="grid sm:grid-cols-2 gap-3">
++          <Field label="Phone number">
++            <input
++              type="tel"
++              value={form.phoneNumber}
++              onChange={(e) => update('phoneNumber', e.target.value)}
++              className="input"
++            />
++          </Field>
++          <Field label="Your role">
++            <input
++              type="text"
++              value={form.roleTitle}
++              onChange={(e) => update('roleTitle', e.target.value)}
++              className="input"
++              placeholder="e.g. Leasing Manager"
++            />
++          </Field>
++        </div>
++
++        <Field label="Anything else? (optional)" hint="Help our admin verify you faster.">
++          <textarea
++            rows={4}
++            value={form.proofMessage}
++            onChange={(e) => update('proofMessage', e.target.value)}
++            className="input rounded-2xl"
++            placeholder="e.g. I've worked at this property since 2022. You can verify via the leasing office number listed on our website."
++          />
++        </Field>
++
++        {error && <p className="text-sm text-red-600">{error}</p>}
++
++        <div className="flex gap-2 pt-1">
++          <button disabled={submitting} className="btn-primary">
++            {submitting ? 'Submitting…' : 'Submit claim for review'}
++          </button>
++          <button type="button" onClick={() => navigate(-1)} className="btn-ghost">
++            Cancel
++          </button>
++        </div>
++      </form>
++    </div>
++  );
++}
++
++function Field({ label, children, hint }) {
++  return (
++    <label className="block">
++      <span className="label">{label}</span>
++      {children}
++      {hint && <p className="text-xs text-ink-500 mt-1">{hint}</p>}
++    </label>
++  );
++}
+diff -ruN a/frontend/src/pages/EditClaimedListing.jsx b/frontend/src/pages/EditClaimedListing.jsx
+--- a/frontend/src/pages/EditClaimedListing.jsx	1970-01-01 00:00:00.000000000 +0000
++++ b/frontend/src/pages/EditClaimedListing.jsx	2026-05-23 14:55:09.233237729 +0000
+@@ -0,0 +1,171 @@
++import { useEffect, useState } from 'react';
++import { useParams, useNavigate, Link } from 'react-router-dom';
++import { api } from '../api/client.js';
++import { useAuth } from '../context/AuthContext.jsx';
++import { useToast } from '../context/ToastContext.jsx';
++
++// Mirrors the backend allowlist exactly. Updating it here without updating
++// the backend route is harmless — the backend will silently drop fields
++// it doesn't accept.
++const EDITABLE = [
++  { key: 'priceMin',     label: 'Price (min, $/mo)',    type: 'number' },
++  { key: 'priceMax',     label: 'Price (max, $/mo)',    type: 'number' },
++  { key: 'bedroomsMin',  label: 'Bedrooms (min)',       type: 'number' },
++  { key: 'bedroomsMax',  label: 'Bedrooms (max)',       type: 'number' },
++  { key: 'bathroomsMin', label: 'Bathrooms (min)',      type: 'number' },
++  { key: 'bathroomsMax', label: 'Bathrooms (max)',      type: 'number' },
++  { key: 'contactEmail', label: 'Contact email',        type: 'email' },
++  { key: 'contactPhone', label: 'Contact phone',        type: 'tel' },
++  { key: 'sourceUrl',    label: 'Official website',     type: 'url' },
++  { key: 'officeHours',  label: 'Office hours',         type: 'text' },
++  { key: 'petFriendly',  label: 'Pet friendly',         type: 'checkbox' },
++  { key: 'description',  label: 'Description',          type: 'textarea' },
++  { key: 'amenities',    label: 'Amenities',            type: 'list' },
++  { key: 'keyAmenities', label: 'Key amenities',        type: 'list' },
++  { key: 'photos',       label: 'Photo URLs',           type: 'list' },
++];
++
++export default function EditClaimedListingPage() {
++  const { id } = useParams();
++  const navigate = useNavigate();
++  const { user } = useAuth();
++  const { toast } = useToast();
++  const [listing, setListing] = useState(null);
++  const [form, setForm] = useState({});
++  const [loading, setLoading] = useState(true);
++  const [saving, setSaving] = useState(false);
++
++  useEffect(() => {
++    api.get(`/listings/${id}`)
++      .then(({ listing }) => {
++        setListing(listing);
++        const initial = {};
++        for (const f of EDITABLE) {
++          const v = listing[f.key];
++          initial[f.key] = f.type === 'list' && Array.isArray(v) ? v.join('\n')
++                          : v == null ? (f.type === 'checkbox' ? false : '')
++                          : v;
++        }
++        setForm(initial);
++      })
++      .catch((err) => toast.error(err.message))
++      .finally(() => setLoading(false));
++  }, [id, toast]);
++
++  if (loading) return <div className="p-12 text-center text-ink-500">Loading…</div>;
++  if (!listing) return null;
++
++  const verifiedFor = (user?.verifiedManagerFor || []).map(String);
++  const allowed = verifiedFor.includes(String(id));
++  if (!allowed) {
++    return (
++      <div className="max-w-2xl mx-auto p-6">
++        <h1 className="section-cap">Not authorized</h1>
++        <p className="text-sm text-ink-500 mt-2">
++          You can only edit listings you have a verified manager claim for.{' '}
++          <Link to={`/manager/claim-property?listing=${id}`} className="underline">
++            Submit a claim
++          </Link>{' '}
++          and wait for admin approval.
++        </p>
++      </div>
++    );
++  }
++
++  function update(k, v) {
++    setForm((f) => ({ ...f, [k]: v }));
++  }
++
++  async function save(e) {
++    e.preventDefault();
++    setSaving(true);
++    try {
++      // Build the update payload — convert lists from textarea back to arrays,
++      // skip unchanged numeric fields that are NaN.
++      const payload = {};
++      for (const f of EDITABLE) {
++        const v = form[f.key];
++        if (f.type === 'list') {
++          payload[f.key] = String(v || '').split('\n').map((s) => s.trim()).filter(Boolean);
++        } else if (f.type === 'number') {
++          if (v === '' || v == null) continue;
++          const n = Number(v);
++          if (Number.isFinite(n)) payload[f.key] = n;
++        } else if (f.type === 'checkbox') {
++          payload[f.key] = !!v;
++        } else {
++          payload[f.key] = v;
++        }
++      }
++      const data = await api.patch(`/listings/${id}`, payload);
++      toast.success(
++        data.autoApproved
++          ? `Saved. Updated: ${data.editedFields.join(', ')}.`
++          : 'Saved. Your changes are pending admin review.'
++      );
++      navigate('/manager');
++    } catch (err) {
++      if (err.status === 401) return;
++      if (err.status === 403) {
++        toast.error('You can only edit listings you have a verified claim for.');
++        return;
++      }
++      if (err.status === 503) {
++        toast.error('Manager edits are temporarily disabled. Contact admin@hone.local.');
++        return;
++      }
++      toast.error(err.message);
++    } finally {
++      setSaving(false);
++    }
++  }
++
++  return (
++    <div className="max-w-2xl mx-auto p-4 sm:p-6">
++      <div className="flex items-start justify-between mb-2">
++        <div>
++          <h1 className="section-cap mb-1">Edit official listing info</h1>
++          <p className="text-sm text-ink-500">{listing.name}</p>
++        </div>
++        <span className="chip bg-sage-200 text-xs">Verified Property Manager</span>
++      </div>
++
++      <p className="text-xs text-ink-500 mb-4">
++        These fields appear on the public listing as <strong>official, property-provided info</strong>.
++        Student reviews and student-posted subleases are separate and you cannot edit them.
++      </p>
++
++      <form onSubmit={save} className="space-y-3">
++        {EDITABLE.map((f) => (
++          <FieldRow key={f.key} field={f} value={form[f.key]} onChange={(v) => update(f.key, v)} />
++        ))}
++
++        <div className="flex gap-2 pt-2">
++          <button disabled={saving} className="btn-primary">
++            {saving ? 'Saving…' : 'Save changes'}
++          </button>
++          <button type="button" onClick={() => navigate('/manager')} className="btn-ghost">
++            Cancel
++          </button>
++        </div>
++      </form>
++    </div>
++  );
++}
++
++function FieldRow({ field, value, onChange }) {
++  return (
++    <label className="block">
++      <span className="label">{field.label}</span>
++      {field.type === 'textarea' ? (
++        <textarea rows={4} value={value || ''} onChange={(e) => onChange(e.target.value)} className="input rounded-2xl" />
++      ) : field.type === 'list' ? (
++        <textarea rows={3} value={value || ''} onChange={(e) => onChange(e.target.value)} className="input rounded-2xl" placeholder="One per line" />
++      ) : field.type === 'checkbox' ? (
++        <input type="checkbox" checked={!!value} onChange={(e) => onChange(e.target.checked)} />
++      ) : (
++        <input type={field.type} value={value ?? ''} onChange={(e) => onChange(e.target.value)} className="input" />
++      )}
++    </label>
++  );
++}
+diff -ruN a/frontend/src/pages/ManagerDashboard.jsx b/frontend/src/pages/ManagerDashboard.jsx
+--- a/frontend/src/pages/ManagerDashboard.jsx	2026-05-23 14:47:08.769242254 +0000
++++ b/frontend/src/pages/ManagerDashboard.jsx	2026-05-23 14:55:46.749237376 +0000
+@@ -3,159 +3,179 @@
+ import { api } from '../api/client.js';
+ import { useAuth } from '../context/AuthContext.jsx';
+ import { useToast } from '../context/ToastContext.jsx';
+-import { ListingImage } from '../components/ImagePreviewInput.jsx';
+ 
+ export default function ManagerDashboardPage() {
+   const { user } = useAuth();
+   const { toast } = useToast();
+   const [claims, setClaims] = useState([]);
+   const [listings, setListings] = useState([]);
+-  const [showClaimForm, setShowClaimForm] = useState(false);
+   const [loading, setLoading] = useState(true);
+ 
+   useEffect(() => {
+-    Promise.all([api.get('/claims/mine'), api.get('/listings')])
++    if (!user || user.role !== 'manager') {
++      setLoading(false);
++      return;
++    }
++    Promise.all([api.get('/manager-claims/mine'), api.get('/listings')])
+       .then(([c, l]) => {
+         setClaims(c.claims);
+-        setListings(l.listings);
++        // verifiedManagerFor lives on the user; cross-reference to get full listing objects.
++        const verifiedSet = new Set((user.verifiedManagerFor || []).map(String));
++        setListings(l.listings.filter((x) => verifiedSet.has(String(x._id))));
+       })
+       .catch((err) => toast.error(err.message))
+       .finally(() => setLoading(false));
+-  }, [toast]);
++  }, [user, toast]);
+ 
+-  const myListings = listings.filter(
+-    (l) => l.manager && String(l.manager) === String(user.id)
+-  );
+-  const claimable = listings.filter((l) => l.claimable);
++  if (!user) return null;
++  if (user.role !== 'manager') {
++    return (
++      <div className="max-w-2xl mx-auto p-6">
++        <h1 className="section-cap">Manager dashboard</h1>
++        <p className="text-sm text-ink-500 mt-2">
++          This area is for property managers. If you're a UC Davis student, head to your{' '}
++          <Link to="/dashboard" className="underline">student dashboard</Link>.
++        </p>
++      </div>
++    );
++  }
+ 
+   return (
+     <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-8">
+-      <div>
++      <header>
+         <h1 className="section-cap">Manager dashboard</h1>
+         <p className="text-sm text-ink-500 mt-1">
+-          {user.company} ·{' '}
+-          <span className="chip">{user.managerStatus}</span>
++          Welcome, {user.name}. {user.company && <>You manage <strong>{user.company}</strong>.</>}
+         </p>
+-      </div>
++      </header>
+ 
+-      {loading && <p>Loading…</p>}
++      {loading && <p className="text-ink-500">Loading…</p>}
+ 
++      {/* Claimed (approved) listings */}
+       <section>
+-        <h2 className="section-cap mb-3">Claimed listings</h2>
+-        {myListings.length === 0 ? (
+-          <p className="text-sm text-ink-500">
+-            You don't manage any listings yet. Submit a claim request below.
+-          </p>
++        <h2 className="section-cap mb-3">Your verified properties</h2>
++        {listings.length === 0 ? (
++          <EmptyCard
++            title="No claimed listings yet"
++            subtitle="Submit a claim below. Once an admin approves it, you'll be able to edit official listing details here."
++          />
+         ) : (
+-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+-            {myListings.map((l) => (
+-              <Link key={l._id} to={`/listings/${l._id}`} className="card overflow-hidden hover:shadow-md">
+-                <ListingImage src={l.photos?.[0]} className="w-full h-32 object-cover" alt={l.name} />
+-                <div className="p-3">
++          <div className="space-y-2">
++            {listings.map((l) => (
++              <div key={l._id} className="card p-4 flex flex-wrap items-center gap-3">
++                <div className="flex-1 min-w-0">
+                   <div className="font-medium">{l.name}</div>
+                   <div className="text-xs text-ink-500">{l.address}</div>
++                  <div className="mt-1 text-xs">
++                    <span className="chip bg-sage-200">Verified Property Manager</span>
++                  </div>
+                 </div>
+-              </Link>
++                <Link to={`/manager/listings/${l._id}/edit`} className="btn-primary text-xs">
++                  Edit official info
++                </Link>
++                <Link to={`/listings/${l._id}`} className="btn-ghost text-xs">
++                  View public page
++                </Link>
++              </div>
+             ))}
+           </div>
+         )}
+       </section>
+ 
++      {/* Pending / past claims */}
+       <section>
+         <div className="flex items-center justify-between mb-3">
+-          <h2 className="section-cap">Claim a listing</h2>
+-          <button onClick={() => setShowClaimForm((s) => !s)} className="btn-primary text-xs">
+-            {showClaimForm ? 'Cancel' : '+ New claim request'}
+-          </button>
++          <h2 className="section-cap">Your claims</h2>
++          <Link to="/manager/claim-property" className="btn-primary text-xs">
++            + Submit a new claim
++          </Link>
+         </div>
+-        {showClaimForm && (
+-          <ClaimForm
+-            listings={claimable}
+-            onSubmitted={(c) => {
+-              setClaims([c, ...claims]);
+-              setShowClaimForm(false);
+-              toast.success('Claim request submitted. An admin will review it shortly.');
+-            }}
++        {claims.length === 0 ? (
++          <EmptyCard
++            title="No claims submitted"
++            subtitle="Claim a property to manage its official listing details on hone."
+           />
++        ) : (
++          <div className="space-y-2">
++            {claims.map((c) => (
++              <ClaimCard key={c.id} claim={c} />
++            ))}
++          </div>
+         )}
+-        <div className="mt-3 space-y-2">
+-          {claims.length === 0 ? (
+-            <p className="text-sm text-ink-500">No claim requests submitted.</p>
+-          ) : (
+-            claims.map((c) => (
+-              <div key={c._id} className="card p-3 flex items-center gap-3">
+-                <div className="flex-1">
+-                  <div className="font-medium text-sm">{c.listing?.name}</div>
+-                  <div className="text-xs text-ink-500">{c.listing?.address}</div>
+-                </div>
+-                <span className="chip">{c.status}</span>
+-              </div>
+-            ))
++      </section>
++
++      <section>
++        <h2 className="section-cap mb-2">What managers can and can't do</h2>
++        <ul className="text-sm text-ink-700 space-y-1 list-disc list-inside">
++          <li>Edit official listing details for your claimed properties only.</li>
++          <li><strong>Cannot</strong> edit, delete, or hide student reviews.</li>
++          <li><strong>Cannot</strong> delete or modify student subleases.</li>
++          <li><strong>Cannot</strong> message students unless they message you first.</li>
++          <li><strong>Cannot</strong> claim a property without admin approval.</li>
++        </ul>
++      </section>
++    </div>
++  );
++}
++
++function ClaimCard({ claim }) {
++  const listing = claim.listing || {};
++  return (
++    <div className="card p-4">
++      <div className="flex flex-wrap items-start gap-3">
++        <div className="flex-1 min-w-0">
++          <div className="font-medium">{claim.propertyName || listing.name}</div>
++          <div className="text-xs text-ink-500">{listing.address}</div>
++          <div className="mt-1 text-xs flex flex-wrap gap-1.5">
++            <ClaimStatusChip status={claim.status} />
++            <ConfidenceChip confidence={claim.confidence} />
++          </div>
++          {claim.status === 'pending' && (
++            <p className="text-xs text-ink-500 mt-2">
++              Your claim is pending admin review. Most are reviewed within 1–2 business days.
++            </p>
++          )}
++          {claim.status === 'rejected' && claim.adminNote && (
++            <p className="text-xs text-red-700 mt-2">
++              Reason: {claim.adminNote}
++            </p>
+           )}
+         </div>
+-      </section>
++      </div>
++      <div className="mt-3 text-xs text-ink-500 grid sm:grid-cols-2 gap-1">
++        <div><strong>Work email:</strong> {claim.workEmail}</div>
++        {claim.companyWebsite && <div><strong>Website:</strong> {claim.companyWebsite}</div>}
++        {claim.roleTitle && <div><strong>Role:</strong> {claim.roleTitle}</div>}
++        {claim.phoneNumber && <div><strong>Phone:</strong> {claim.phoneNumber}</div>}
++      </div>
+     </div>
+   );
+ }
+ 
+-function ClaimForm({ listings, onSubmitted }) {
+-  const [form, setForm] = useState({ listingId: '', phone: '', note: '' });
+-  const [error, setError] = useState(null);
+-  const [submitting, setSubmitting] = useState(false);
+-
+-  async function submit(e) {
+-    e.preventDefault();
+-    setError(null);
+-    setSubmitting(true);
+-    try {
+-      const { claim } = await api.post('/claims', form);
+-      onSubmitted(claim);
+-    } catch (e) {
+-      setError(e.message);
+-    } finally {
+-      setSubmitting(false);
+-    }
+-  }
++function ClaimStatusChip({ status }) {
++  const cls = {
++    pending: 'bg-cream-200',
++    approved: 'bg-sage-200',
++    rejected: 'bg-red-100 text-red-900',
++    revoked: 'bg-red-100 text-red-900',
++  }[status] || 'bg-cream-200';
++  return <span className={`chip ${cls}`}>{status}</span>;
++}
++
++function ConfidenceChip({ confidence }) {
++  const cls = {
++    high: 'bg-sage-200',
++    medium: 'bg-cream-200',
++    low: 'bg-red-100 text-red-900',
++  }[confidence] || 'bg-cream-200';
++  return <span className={`chip ${cls}`}>confidence: {confidence}</span>;
++}
++
++function EmptyCard({ title, subtitle }) {
+   return (
+-    <form onSubmit={submit} className="card p-4 space-y-3">
+-      <label className="block">
+-        <span className="label">Listing</span>
+-        <select
+-          value={form.listingId}
+-          onChange={(e) => setForm({ ...form, listingId: e.target.value })}
+-          required
+-          className="input"
+-        >
+-          <option value="">Choose a listing to claim…</option>
+-          {listings.map((l) => (
+-            <option key={l._id} value={l._id}>
+-              {l.name}
+-            </option>
+-          ))}
+-        </select>
+-      </label>
+-      <label className="block">
+-        <span className="label">Contact phone</span>
+-        <input
+-          type="tel"
+-          value={form.phone}
+-          onChange={(e) => setForm({ ...form, phone: e.target.value })}
+-          className="input"
+-        />
+-      </label>
+-      <label className="block">
+-        <span className="label">Note to admin</span>
+-        <textarea
+-          value={form.note}
+-          onChange={(e) => setForm({ ...form, note: e.target.value })}
+-          rows={3}
+-          className="input rounded-2xl"
+-        />
+-      </label>
+-      {error && <p className="text-sm text-red-600">{error}</p>}
+-      <button disabled={submitting} className="btn-primary">
+-        {submitting ? 'Submitting…' : 'Submit claim request'}
+-      </button>
+-    </form>
++    <div className="bg-cream-50 border border-cream-200 rounded-2xl p-8 text-center">
++      <p className="text-sm font-medium">{title}</p>
++      <p className="text-xs text-ink-500 mt-1">{subtitle}</p>
++    </div>
+   );
+ }

@@ -13,6 +13,8 @@ import DashboardPage from './pages/Dashboard.jsx';
 import SubleaseFormPage from './pages/SubleaseForm.jsx';
 import MessagesPage from './pages/Messages.jsx';
 import ManagerDashboardPage from './pages/ManagerDashboard.jsx';
+import ClaimListingPage from './pages/ClaimListing.jsx';
+import EditClaimedListingPage from './pages/EditClaimedListing.jsx';
 import AdminDashboardPage from './pages/AdminDashboard.jsx';
 import AboutPage from './pages/About.jsx';
 import PrivacyPage from './pages/Privacy.jsx';
@@ -80,6 +82,22 @@ export default function App() {
             element={
               <ProtectedRoute roles={['manager']}>
                 <ManagerDashboardPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/manager/claim-property"
+            element={
+              <ProtectedRoute roles={['manager']}>
+                <ClaimListingPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/manager/listings/:id/edit"
+            element={
+              <ProtectedRoute roles={['manager']}>
+                <EditClaimedListingPage />
               </ProtectedRoute>
             }
           />

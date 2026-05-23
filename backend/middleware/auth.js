@@ -58,4 +58,39 @@ function requireVerifiedStudent(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, attachUser, requireRole, requireVerifiedStudent };
+// Guard for PATCH /listings/:id and similar manager-only edits.
+//
+// Allows the request iff:
+//   1. req.user is a manager AND
+//   2. req.user.verifiedManagerFor includes req.params[paramName]
+//
+// Returns 401 if not authed, 403 otherwise. Admins are deliberately NOT
+// short-circuited here — admins should use the admin-only endpoints.
+function requireVerifiedManagerOfListing(paramName = 'id') {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Not authenticated' });
+    if (req.user.role !== 'manager')
+      return res.status(403).json({ error: 'Manager account required.' });
+
+    const listingId = req.params[paramName];
+    if (!listingId)
+      return res.status(400).json({ error: 'Listing id missing in URL.' });
+
+    const verifiedFor = (req.user.verifiedManagerFor || []).map(String);
+    if (!verifiedFor.includes(String(listingId))) {
+      return res.status(403).json({
+        error:
+          'You can only edit listings you have a verified manager claim for. Submit a claim and wait for admin approval.',
+      });
+    }
+    next();
+  };
+}
+
+module.exports = {
+  requireAuth,
+  attachUser,
+  requireRole,
+  requireVerifiedStudent,
+  requireVerifiedManagerOfListing,
+};

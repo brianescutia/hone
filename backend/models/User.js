@@ -62,6 +62,15 @@ const UserSchema = new mongoose.Schema(
       enum: ['pending', 'approved', 'rejected'],
       default: 'pending',
     },
+    // Listings this manager has SUBMITTED a claim for (any status).
+    // Useful for "your claim is pending" UI.
+    claimedListings: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Listing' }],
+    // Listings this manager has been APPROVED for. Source of truth for
+    // "can this manager edit this listing?" — see requireVerifiedManagerOfListing.
+    verifiedManagerFor: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Listing' }],
+    workEmail: { type: String, default: '', lowercase: true, trim: true },
+    managerDomain: { type: String, default: '', lowercase: true },
+    managerVerifiedAt: { type: Date, default: null },
 
     // ---- Student-only fields ----
     savedListings: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Listing' }],
@@ -132,6 +141,11 @@ UserSchema.methods.toPublicJSON = function () {
     suspended: this.suspended,
     company: this.company,
     managerStatus: this.managerStatus,
+    claimedListings: this.claimedListings,
+    verifiedManagerFor: this.verifiedManagerFor,
+    workEmail: this.workEmail,
+    managerDomain: this.managerDomain,
+    managerVerifiedAt: this.managerVerifiedAt,
     savedListings: this.savedListings,
     bio: this.bio,
     avatarUrl: this.avatarUrl,

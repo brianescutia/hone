@@ -2,7 +2,12 @@ const express = require('express');
 const Listing = require('../models/Listing');
 const Sublease = require('../models/Sublease');
 const Review = require('../models/Review');
-const { attachUser, requireAuth } = require('../middleware/auth');
+const {
+  attachUser,
+  requireAuth,
+  requireVerifiedManagerOfListing,
+} = require('../middleware/auth');
+const { writeLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
@@ -54,7 +59,8 @@ router.get('/', attachUser, async (req, res, next) => {
 // GET /api/listings/:id
 router.get('/:id', attachUser, async (req, res, next) => {
   try {
-    const listing = await Listing.findById(req.params.id);
+    const listing = await Listing.findById(req.params.id)
+      .populate('claimedBy', 'name company');
     if (!listing) return res.status(404).json({ error: 'Listing not found' });
 
     const [subleases, reviews, similar] = await Promise.all([
@@ -98,5 +104,86 @@ router.post('/:id/favorite', requireAuth, async (req, res, next) => {
     next(err);
   }
 });
+
+// ---------------------------------------------------------------------------
+// PATCH /api/listings/:id — manager edits to a claimed listing
+//
+// Only verified managers of THIS listing can call it (enforced by
+// requireVerifiedManagerOfListing). Even then, only an allowlisted set of
+// fields can be touched — no flipping verificationStatus, no swapping
+// sourceType, no reassigning claimedBy.
+//
+// If MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES is true, the edit is
+// applied immediately and `lastManagerUpdateAt` is bumped. Otherwise the
+// route returns 503 (no "pending edits" table in this pass).
+// ---------------------------------------------------------------------------
+
+const MANAGER_EDITABLE_FIELDS = new Set([
+  'priceMin',
+  'priceMax',
+  'bedroomsMin',
+  'bedroomsMax',
+  'bathroomsMin',
+  'bathroomsMax',
+  'amenities',
+  'keyAmenities',
+  'feesAndPolicies',
+  'tags',
+  'photos',
+  'description',
+  'sourceUrl', // official property website
+  'contactEmail',
+  'contactPhone',
+  'officeHours',
+  'petFriendly',
+  'floorPlans',
+]);
+
+router.patch(
+  '/:id',
+  writeLimiter,
+  requireAuth,
+  requireVerifiedManagerOfListing('id'),
+  async (req, res, next) => {
+    try {
+      const autoApprove =
+        String(process.env.MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES || '')
+          .toLowerCase() === 'true';
+      if (!autoApprove) {
+        return res.status(503).json({
+          error:
+            'Manager edits are disabled on this deployment. Ask an admin to enable MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES.',
+        });
+      }
+
+      const listing = await Listing.findById(req.params.id);
+      if (!listing) return res.status(404).json({ error: 'Listing not found' });
+
+      const updates = {};
+      for (const [k, v] of Object.entries(req.body || {})) {
+        if (MANAGER_EDITABLE_FIELDS.has(k)) updates[k] = v;
+      }
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({
+          error:
+            'No editable fields supplied. Editable: ' +
+            Array.from(MANAGER_EDITABLE_FIELDS).join(', '),
+        });
+      }
+
+      Object.assign(listing, updates);
+      listing.lastManagerUpdateAt = new Date();
+      await listing.save();
+
+      res.json({
+        listing,
+        editedFields: Object.keys(updates),
+        autoApproved: true,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 module.exports = router;

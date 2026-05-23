@@ -1,6 +1,7 @@
 const express = require('express');
 const Sublease = require('../models/Sublease');
 const ClaimRequest = require('../models/ClaimRequest');
+const ManagerClaim = require('../models/ManagerClaim');
 const Review = require('../models/Review');
 const Report = require('../models/Report');
 const User = require('../models/User');
@@ -21,19 +22,23 @@ router.use(requireAuth, requireRole('admin'));
 // GET /api/admin/pending — everything awaiting review
 router.get('/pending', async (_req, res, next) => {
   try {
-    const [subleases, claims, reports, listings] = await Promise.all([
+    const [subleases, claims, managerClaims, reports, listings] = await Promise.all([
       Sublease.find({ moderation: 'pending' })
         .populate('listing', 'name')
         .populate('poster', 'name email studentVerified verificationStatus'),
       ClaimRequest.find({ status: 'pending' })
         .populate('listing', 'name')
         .populate('manager', 'name email company'),
+      ManagerClaim.find({ status: 'pending' })
+        .populate('listing', 'name address claimStatus')
+        .populate('manager', 'name email role company')
+        .sort({ createdAt: -1 }),
       Report.find({ status: 'open' })
         .populate('reporter', 'name email')
         .sort({ createdAt: -1 }),
       Listing.find({ verificationStatus: 'pending_review' }),
     ]);
-    res.json({ subleases, claims, reports, listings });
+    res.json({ subleases, claims, managerClaims, reports, listings });
   } catch (err) {
     next(err);
   }
@@ -84,6 +89,8 @@ router.patch('/subleases/:id/reject', async (req, res, next) => {
   }
 });
 
+// ---------- Legacy ClaimRequest endpoints (kept for back-compat) ----------
+
 // PATCH /api/admin/claims/:id/approve — approve manager claim, attach listing
 router.patch('/claims/:id/approve', async (req, res, next) => {
   try {
@@ -114,6 +121,206 @@ router.patch('/claims/:id/reject', async (req, res, next) => {
     );
     if (!claim) return res.status(404).json({ error: 'Not found' });
     res.json({ claim });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------- New ManagerClaim endpoints ----------
+
+// GET /api/admin/manager-claims?status=pending
+router.get('/manager-claims', async (req, res, next) => {
+  try {
+    const filter = {};
+    if (req.query.status) filter.status = req.query.status;
+    const claims = await ManagerClaim.find(filter)
+      .populate('listing', 'name address claimStatus claimedByManager photos')
+      .populate('manager', 'name email role company')
+      .populate('reviewedBy', 'name email')
+      .sort({ createdAt: -1 })
+      .limit(500);
+    res.json({ claims });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/manager-claims/:id/approve
+router.patch('/manager-claims/:id/approve', async (req, res, next) => {
+  try {
+    const claim = await ManagerClaim.findById(req.params.id);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+    if (claim.status === 'approved')
+      return res.status(409).json({ error: 'Claim is already approved.' });
+
+    const listing = await Listing.findById(claim.listing);
+    if (!listing) return res.status(404).json({ error: 'Underlying listing not found.' });
+
+    // Refuse if a *different* approved manager already holds this listing.
+    if (
+      listing.claimedByManager &&
+      listing.claimedBy &&
+      !listing.claimedBy.equals(claim.manager)
+    ) {
+      return res.status(409).json({
+        error:
+          'Another manager already has an approved claim on this listing. Revoke it first.',
+      });
+    }
+
+    claim.status = 'approved';
+    claim.reviewedBy = req.user._id;
+    claim.reviewedAt = new Date();
+    if (req.body.adminNote) claim.adminNote = req.body.adminNote;
+    await claim.save();
+
+    listing.claimedByManager = true;
+    listing.claimedBy = claim.manager;
+    listing.manager = claim.manager; // legacy field
+    listing.claimable = false;
+    listing.claimStatus = 'claimed';
+    listing.verificationStatus = 'claimed';
+    listing.managerVerified = claim.confidence !== 'low';
+    listing.officialManagerDomain = claim.websiteDomain || '';
+    await listing.save();
+
+    const user = await User.findById(claim.manager);
+    if (user) {
+      const ids = new Set((user.verifiedManagerFor || []).map(String));
+      ids.add(String(listing._id));
+      user.verifiedManagerFor = Array.from(ids);
+      if (!(user.claimedListings || []).some((id) => id.equals(listing._id))) {
+        user.claimedListings.push(listing._id);
+      }
+      user.managerStatus = 'approved';
+      user.managerVerifiedAt = new Date();
+      if (!user.managerDomain && claim.emailDomain) user.managerDomain = claim.emailDomain;
+      if (!user.workEmail && claim.workEmail) user.workEmail = claim.workEmail;
+      if (!user.company && claim.propertyName) user.company = claim.propertyName;
+      await user.save();
+    }
+
+    // Auto-reject any other pending claims from OTHER managers for this listing.
+    await ManagerClaim.updateMany(
+      {
+        listing: listing._id,
+        status: 'pending',
+        _id: { $ne: claim._id },
+        manager: { $ne: claim.manager },
+      },
+      {
+        $set: {
+          status: 'rejected',
+          adminNote: 'Auto-rejected: another claim was approved for this listing.',
+          reviewedBy: req.user._id,
+          reviewedAt: new Date(),
+        },
+      }
+    );
+
+    res.json({ claim, listing });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/admin/manager-claims/:id/reject
+router.patch('/manager-claims/:id/reject', async (req, res, next) => {
+  try {
+    const claim = await ManagerClaim.findById(req.params.id);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+    claim.status = 'rejected';
+    claim.adminNote = req.body.adminNote || '';
+    claim.reviewedBy = req.user._id;
+    claim.reviewedAt = new Date();
+    await claim.save();
+
+    // If this was the only pending claim, clear the listing's pending state.
+    const listing = await Listing.findById(claim.listing);
+    if (listing && listing.claimStatus === 'pending') {
+      const otherPending = await ManagerClaim.countDocuments({
+        listing: listing._id,
+        status: 'pending',
+      });
+      if (!otherPending && !listing.claimedByManager) {
+        listing.claimStatus = 'unclaimed';
+        await listing.save();
+      }
+    }
+
+    res.json({ claim });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/listings/:id/revoke-claim — strip a manager's claim on
+// a listing. The ManagerClaim record is marked 'revoked' for audit.
+router.post('/listings/:id/revoke-claim', async (req, res, next) => {
+  try {
+    const listing = await Listing.findById(req.params.id);
+    if (!listing) return res.status(404).json({ error: 'Listing not found' });
+    const previousClaimedBy = listing.claimedBy;
+
+    listing.claimedByManager = false;
+    listing.claimedBy = null;
+    listing.manager = null;
+    listing.claimable = true;
+    listing.claimStatus = 'unclaimed';
+    listing.managerVerified = false;
+    listing.officialManagerDomain = '';
+    if (listing.verificationStatus === 'claimed') listing.verificationStatus = 'verified';
+    await listing.save();
+
+    if (previousClaimedBy) {
+      const u = await User.findById(previousClaimedBy);
+      if (u) {
+        u.verifiedManagerFor = (u.verifiedManagerFor || []).filter(
+          (id) => !id.equals(listing._id)
+        );
+        await u.save();
+      }
+    }
+
+    await ManagerClaim.updateMany(
+      { listing: listing._id, status: 'approved' },
+      {
+        $set: {
+          status: 'revoked',
+          adminNote: req.body.reason || 'Claim revoked by admin.',
+          reviewedBy: req.user._id,
+          reviewedAt: new Date(),
+        },
+      }
+    );
+
+    res.json({ listing });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/claimed-listings — all currently-claimed listings
+router.get('/claimed-listings', async (_req, res, next) => {
+  try {
+    const listings = await Listing.find({ claimedByManager: true })
+      .populate('claimedBy', 'name email company workEmail managerDomain')
+      .sort({ lastManagerUpdateAt: -1, updatedAt: -1 });
+    res.json({ listings });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/admin/manager-updates — listings recently edited by their manager
+router.get('/manager-updates', async (req, res, next) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const listings = await Listing.find({ lastManagerUpdateAt: { $ne: null } })
+      .populate('claimedBy', 'name email')
+      .sort({ lastManagerUpdateAt: -1 })
+      .limit(limit);
+    res.json({ listings });
   } catch (err) {
     next(err);
   }
@@ -222,7 +429,9 @@ router.get('/users', async (_req, res, next) => {
 // GET /api/admin/listings
 router.get('/listings', async (_req, res, next) => {
   try {
-    const listings = await Listing.find().populate('manager', 'name email');
+    const listings = await Listing.find()
+      .populate('manager', 'name email')
+      .populate('claimedBy', 'name email');
     res.json({ listings });
   } catch (err) {
     next(err);

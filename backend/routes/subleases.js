@@ -44,6 +44,14 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
+// Auto-approval gate. Verified UC Davis students get their subleases
+// published immediately iff the operator has set the env flag. We never
+// auto-approve unverified posts, regardless of the flag.
+function shouldAutoApprove(user) {
+  if (!user || user.role !== 'student' || !user.studentVerified) return false;
+  return String(process.env.AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES || '').toLowerCase() === 'true';
+}
+
 // POST /api/subleases — create (verified student only)
 router.post('/', writeLimiter, requireAuth, requireVerifiedStudent, async (req, res, next) => {
   try {
@@ -55,15 +63,18 @@ router.post('/', writeLimiter, requireAuth, requireVerifiedStudent, async (req, 
     const listing = await Listing.findById(req.body.listing);
     if (!listing) return res.status(400).json({ error: 'Listing not found' });
 
+    const autoApproved = shouldAutoApprove(req.user);
     const sub = await Sublease.create({
       ...req.body,
       poster: req.user._id,
-      moderation: 'pending',
+      moderation: autoApproved ? 'approved' : 'pending',
     });
     res.status(201).json({
       sublease: sub,
-      message:
-        'Your sublease is pending review. An admin will approve it shortly, then it will appear publicly.',
+      autoApproved,
+      message: autoApproved
+        ? 'Your sublease is live. (Verified UC Davis students post directly.)'
+        : 'Your sublease is pending review. An admin will approve it shortly, then it will appear publicly.',
     });
   } catch (err) {
     next(err);
@@ -128,6 +139,7 @@ router.delete('/:id', requireAuth, async (req, res, next) => {
   try {
     const sub = await Sublease.findById(req.params.id);
     if (!sub) return res.status(404).json({ error: 'Sublease not found' });
+    // Managers cannot delete student subleases. Only the poster or an admin.
     if (!sub.poster.equals(req.user._id) && req.user.role !== 'admin')
       return res.status(403).json({ error: 'Not your sublease' });
 

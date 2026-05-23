@@ -3,159 +3,179 @@ import { Link } from 'react-router-dom';
 import { api } from '../api/client.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useToast } from '../context/ToastContext.jsx';
-import { ListingImage } from '../components/ImagePreviewInput.jsx';
 
 export default function ManagerDashboardPage() {
   const { user } = useAuth();
   const { toast } = useToast();
   const [claims, setClaims] = useState([]);
   const [listings, setListings] = useState([]);
-  const [showClaimForm, setShowClaimForm] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([api.get('/claims/mine'), api.get('/listings')])
+    if (!user || user.role !== 'manager') {
+      setLoading(false);
+      return;
+    }
+    Promise.all([api.get('/manager-claims/mine'), api.get('/listings')])
       .then(([c, l]) => {
         setClaims(c.claims);
-        setListings(l.listings);
+        // verifiedManagerFor lives on the user; cross-reference to get full listing objects.
+        const verifiedSet = new Set((user.verifiedManagerFor || []).map(String));
+        setListings(l.listings.filter((x) => verifiedSet.has(String(x._id))));
       })
       .catch((err) => toast.error(err.message))
       .finally(() => setLoading(false));
-  }, [toast]);
+  }, [user, toast]);
 
-  const myListings = listings.filter(
-    (l) => l.manager && String(l.manager) === String(user.id)
-  );
-  const claimable = listings.filter((l) => l.claimable);
+  if (!user) return null;
+  if (user.role !== 'manager') {
+    return (
+      <div className="max-w-2xl mx-auto p-6">
+        <h1 className="section-cap">Manager dashboard</h1>
+        <p className="text-sm text-ink-500 mt-2">
+          This area is for property managers. If you're a UC Davis student, head to your{' '}
+          <Link to="/dashboard" className="underline">student dashboard</Link>.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-8">
-      <div>
+      <header>
         <h1 className="section-cap">Manager dashboard</h1>
         <p className="text-sm text-ink-500 mt-1">
-          {user.company} ·{' '}
-          <span className="chip">{user.managerStatus}</span>
+          Welcome, {user.name}. {user.company && <>You manage <strong>{user.company}</strong>.</>}
         </p>
-      </div>
+      </header>
 
-      {loading && <p>Loading…</p>}
+      {loading && <p className="text-ink-500">Loading…</p>}
 
+      {/* Claimed (approved) listings */}
       <section>
-        <h2 className="section-cap mb-3">Claimed listings</h2>
-        {myListings.length === 0 ? (
-          <p className="text-sm text-ink-500">
-            You don't manage any listings yet. Submit a claim request below.
-          </p>
+        <h2 className="section-cap mb-3">Your verified properties</h2>
+        {listings.length === 0 ? (
+          <EmptyCard
+            title="No claimed listings yet"
+            subtitle="Submit a claim below. Once an admin approves it, you'll be able to edit official listing details here."
+          />
         ) : (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {myListings.map((l) => (
-              <Link key={l._id} to={`/listings/${l._id}`} className="card overflow-hidden hover:shadow-md">
-                <ListingImage src={l.photos?.[0]} className="w-full h-32 object-cover" alt={l.name} />
-                <div className="p-3">
+          <div className="space-y-2">
+            {listings.map((l) => (
+              <div key={l._id} className="card p-4 flex flex-wrap items-center gap-3">
+                <div className="flex-1 min-w-0">
                   <div className="font-medium">{l.name}</div>
                   <div className="text-xs text-ink-500">{l.address}</div>
+                  <div className="mt-1 text-xs">
+                    <span className="chip bg-sage-200">Verified Property Manager</span>
+                  </div>
                 </div>
-              </Link>
+                <Link to={`/manager/listings/${l._id}/edit`} className="btn-primary text-xs">
+                  Edit official info
+                </Link>
+                <Link to={`/listings/${l._id}`} className="btn-ghost text-xs">
+                  View public page
+                </Link>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* Pending / past claims */}
+      <section>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="section-cap">Your claims</h2>
+          <Link to="/manager/claim-property" className="btn-primary text-xs">
+            + Submit a new claim
+          </Link>
+        </div>
+        {claims.length === 0 ? (
+          <EmptyCard
+            title="No claims submitted"
+            subtitle="Claim a property to manage its official listing details on hone."
+          />
+        ) : (
+          <div className="space-y-2">
+            {claims.map((c) => (
+              <ClaimCard key={c.id} claim={c} />
             ))}
           </div>
         )}
       </section>
 
       <section>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="section-cap">Claim a listing</h2>
-          <button onClick={() => setShowClaimForm((s) => !s)} className="btn-primary text-xs">
-            {showClaimForm ? 'Cancel' : '+ New claim request'}
-          </button>
-        </div>
-        {showClaimForm && (
-          <ClaimForm
-            listings={claimable}
-            onSubmitted={(c) => {
-              setClaims([c, ...claims]);
-              setShowClaimForm(false);
-              toast.success('Claim request submitted. An admin will review it shortly.');
-            }}
-          />
-        )}
-        <div className="mt-3 space-y-2">
-          {claims.length === 0 ? (
-            <p className="text-sm text-ink-500">No claim requests submitted.</p>
-          ) : (
-            claims.map((c) => (
-              <div key={c._id} className="card p-3 flex items-center gap-3">
-                <div className="flex-1">
-                  <div className="font-medium text-sm">{c.listing?.name}</div>
-                  <div className="text-xs text-ink-500">{c.listing?.address}</div>
-                </div>
-                <span className="chip">{c.status}</span>
-              </div>
-            ))
-          )}
-        </div>
+        <h2 className="section-cap mb-2">What managers can and can't do</h2>
+        <ul className="text-sm text-ink-700 space-y-1 list-disc list-inside">
+          <li>Edit official listing details for your claimed properties only.</li>
+          <li><strong>Cannot</strong> edit, delete, or hide student reviews.</li>
+          <li><strong>Cannot</strong> delete or modify student subleases.</li>
+          <li><strong>Cannot</strong> message students unless they message you first.</li>
+          <li><strong>Cannot</strong> claim a property without admin approval.</li>
+        </ul>
       </section>
     </div>
   );
 }
 
-function ClaimForm({ listings, onSubmitted }) {
-  const [form, setForm] = useState({ listingId: '', phone: '', note: '' });
-  const [error, setError] = useState(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  async function submit(e) {
-    e.preventDefault();
-    setError(null);
-    setSubmitting(true);
-    try {
-      const { claim } = await api.post('/claims', form);
-      onSubmitted(claim);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
+function ClaimCard({ claim }) {
+  const listing = claim.listing || {};
   return (
-    <form onSubmit={submit} className="card p-4 space-y-3">
-      <label className="block">
-        <span className="label">Listing</span>
-        <select
-          value={form.listingId}
-          onChange={(e) => setForm({ ...form, listingId: e.target.value })}
-          required
-          className="input"
-        >
-          <option value="">Choose a listing to claim…</option>
-          {listings.map((l) => (
-            <option key={l._id} value={l._id}>
-              {l.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="block">
-        <span className="label">Contact phone</span>
-        <input
-          type="tel"
-          value={form.phone}
-          onChange={(e) => setForm({ ...form, phone: e.target.value })}
-          className="input"
-        />
-      </label>
-      <label className="block">
-        <span className="label">Note to admin</span>
-        <textarea
-          value={form.note}
-          onChange={(e) => setForm({ ...form, note: e.target.value })}
-          rows={3}
-          className="input rounded-2xl"
-        />
-      </label>
-      {error && <p className="text-sm text-red-600">{error}</p>}
-      <button disabled={submitting} className="btn-primary">
-        {submitting ? 'Submitting…' : 'Submit claim request'}
-      </button>
-    </form>
+    <div className="card p-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="font-medium">{claim.propertyName || listing.name}</div>
+          <div className="text-xs text-ink-500">{listing.address}</div>
+          <div className="mt-1 text-xs flex flex-wrap gap-1.5">
+            <ClaimStatusChip status={claim.status} />
+            <ConfidenceChip confidence={claim.confidence} />
+          </div>
+          {claim.status === 'pending' && (
+            <p className="text-xs text-ink-500 mt-2">
+              Your claim is pending admin review. Most are reviewed within 1–2 business days.
+            </p>
+          )}
+          {claim.status === 'rejected' && claim.adminNote && (
+            <p className="text-xs text-red-700 mt-2">
+              Reason: {claim.adminNote}
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="mt-3 text-xs text-ink-500 grid sm:grid-cols-2 gap-1">
+        <div><strong>Work email:</strong> {claim.workEmail}</div>
+        {claim.companyWebsite && <div><strong>Website:</strong> {claim.companyWebsite}</div>}
+        {claim.roleTitle && <div><strong>Role:</strong> {claim.roleTitle}</div>}
+        {claim.phoneNumber && <div><strong>Phone:</strong> {claim.phoneNumber}</div>}
+      </div>
+    </div>
+  );
+}
+
+function ClaimStatusChip({ status }) {
+  const cls = {
+    pending: 'bg-cream-200',
+    approved: 'bg-sage-200',
+    rejected: 'bg-red-100 text-red-900',
+    revoked: 'bg-red-100 text-red-900',
+  }[status] || 'bg-cream-200';
+  return <span className={`chip ${cls}`}>{status}</span>;
+}
+
+function ConfidenceChip({ confidence }) {
+  const cls = {
+    high: 'bg-sage-200',
+    medium: 'bg-cream-200',
+    low: 'bg-red-100 text-red-900',
+  }[confidence] || 'bg-cream-200';
+  return <span className={`chip ${cls}`}>confidence: {confidence}</span>;
+}
+
+function EmptyCard({ title, subtitle }) {
+  return (
+    <div className="bg-cream-50 border border-cream-200 rounded-2xl p-8 text-center">
+      <p className="text-sm font-medium">{title}</p>
+      <p className="text-xs text-ink-500 mt-1">{subtitle}</p>
+    </div>
   );
 }
