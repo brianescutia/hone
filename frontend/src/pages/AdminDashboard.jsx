@@ -14,9 +14,24 @@ const CATEGORY_LABEL = {
   other: 'Other',
 };
 
+const CONFIDENCE_CHIP = {
+  high: 'bg-sage-200',
+  medium: 'bg-cream-200',
+  low: 'bg-red-100 text-red-900',
+};
+
 export default function AdminDashboardPage() {
   const { toast, confirm } = useToast();
-  const [data, setData] = useState({ subleases: [], claims: [], reports: [], listings: [] });
+  // managerClaims is the new ManagerClaim queue (separate from the legacy
+  // ClaimRequest queue in `claims`). Both keys must default to [] so the
+  // `.length` reads below never throw before the first fetch.
+  const [data, setData] = useState({
+    subleases: [],
+    claims: [],
+    managerClaims: [],
+    reports: [],
+    listings: [],
+  });
   const [users, setUsers] = useState([]);
   const [allListings, setAllListings] = useState([]);
   const [leads, setLeads] = useState([]);
@@ -32,7 +47,14 @@ export default function AdminDashboardPage() {
         api.get('/admin/listings'),
         api.get('/admin/external-leads?status=needs_review'),
       ]);
-      setData(p);
+      // Defensive defaults: an older backend deploy might omit managerClaims.
+      setData({
+        subleases: p.subleases || [],
+        claims: p.claims || [],
+        managerClaims: p.managerClaims || [],
+        reports: p.reports || [],
+        listings: p.listings || [],
+      });
       setUsers(u.users);
       setAllListings(l.listings);
       setLeads(lds.leads || []);
@@ -69,8 +91,13 @@ export default function AdminDashboardPage() {
     run('Suspend', () => api.patch(`/admin/users/${u._id}/suspend`, { reason: 'admin action' }), 'User suspended.');
   }
 
+  const managerClaimsCount = data.managerClaims.length;
   const pendingCount =
-    data.subleases.length + data.claims.length + data.reports.length + data.listings.length;
+    data.subleases.length +
+    data.claims.length +
+    managerClaimsCount +
+    data.reports.length +
+    data.listings.length;
 
   return (
     <div className="max-w-6xl mx-auto p-4 sm:p-6">
@@ -179,11 +206,26 @@ export default function AdminDashboardPage() {
             )}
           </Section>
 
-          <Section title={`Pending manager claims (${data.claims.length})`}>
-            {data.claims.length === 0 ? (
-              <Empty msg="No claim requests waiting." />
+          {/*
+            New ManagerClaim queue. Source of truth for the property-claim
+            system going forward; the legacy ClaimRequest section below stays
+            wired up only so any in-flight legacy claims from before this fix
+            can still be processed.
+          */}
+          <Section title={`Pending manager claims (${managerClaimsCount})`}>
+            {managerClaimsCount === 0 ? (
+              <Empty msg="No manager claims waiting." />
             ) : (
-              data.claims.map((c) => (
+              data.managerClaims.map((c) => (
+                <ManagerClaimCard key={c._id} claim={c} run={run} />
+              ))
+            )}
+          </Section>
+
+          {/* Legacy ClaimRequest model — kept visible until backlog drains. */}
+          {data.claims.length > 0 && (
+            <Section title={`Legacy claim requests (${data.claims.length})`}>
+              {data.claims.map((c) => (
                 <div key={c._id} className="card p-3 flex flex-wrap items-center gap-2">
                   <div className="flex-1 min-w-[200px]">
                     <div className="font-medium text-sm">
@@ -213,9 +255,9 @@ export default function AdminDashboardPage() {
                     Reject
                   </button>
                 </div>
-              ))
-            )}
-          </Section>
+              ))}
+            </Section>
+          )}
 
           <Section title={`Open reports (${data.reports.length})`}>
             {data.reports.length === 0 ? (
@@ -360,11 +402,21 @@ export default function AdminDashboardPage() {
                 <div className="text-xs text-ink-500 truncate">{l.address}</div>
                 <div className="mt-1 flex flex-wrap gap-1.5">
                   <ListingBadge listing={l} />
+                  {l.claimedByManager && (
+                    <span className="chip bg-sage-200">claimed by manager</span>
+                  )}
+                  {l.claimStatus === 'pending' && (
+                    <span className="chip bg-cream-200">claim pending</span>
+                  )}
                   {l.hidden && <span className="chip bg-red-100 text-red-900">hidden</span>}
                 </div>
                 <div className="text-xs mt-1">
                   Manager:{' '}
-                  {l.manager ? `${l.manager.name} (${l.manager.email})` : 'unclaimed'}
+                  {l.claimedBy
+                    ? `${l.claimedBy.name} (${l.claimedBy.email})`
+                    : l.manager
+                    ? `${l.manager.name} (${l.manager.email})`
+                    : 'unclaimed'}
                 </div>
                 <div className="mt-2">
                   <button
@@ -385,6 +437,132 @@ export default function AdminDashboardPage() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Rich card for the new ManagerClaim model. Shows every signal the admin
+// needs to make an approve/reject call without leaving the page:
+// property + listing + manager identity, the work email and website domains
+// being compared, the auto-computed confidence + its reason, any free-text
+// proof message, and the current status.
+function ManagerClaimCard({ claim, run }) {
+  const listing = claim.listing || {};
+  const manager = claim.manager || {};
+  return (
+    <div className="card p-3">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="flex-1 min-w-[240px]">
+          <div className="font-medium text-sm">
+            {claim.propertyName || listing.name || '(unnamed property)'}
+          </div>
+          <div className="text-xs text-ink-500 mt-0.5">
+            {listing.name && <span>Listing: <strong>{listing.name}</strong></span>}
+            {listing.address && <span> · {listing.address}</span>}
+          </div>
+
+          <div className="mt-2 grid sm:grid-cols-2 gap-x-4 gap-y-0.5 text-xs">
+            <Detail label="Manager" value={manager.name} />
+            <Detail label="Manager email" value={manager.email} />
+            <Detail label="Work email" value={claim.workEmail} />
+            <Detail
+              label="Website"
+              value={
+                claim.companyWebsite ? (
+                  <a
+                    href={claim.companyWebsite}
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    className="underline break-all"
+                  >
+                    {claim.companyWebsite}
+                  </a>
+                ) : null
+              }
+            />
+            <Detail label="Email domain" value={claim.emailDomain} mono />
+            <Detail label="Website domain" value={claim.websiteDomain} mono />
+            {claim.roleTitle && <Detail label="Role" value={claim.roleTitle} />}
+            {claim.phoneNumber && <Detail label="Phone" value={claim.phoneNumber} />}
+          </div>
+
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <span className={`chip ${CONFIDENCE_CHIP[claim.confidence] || 'bg-cream-200'}`}>
+              confidence: {claim.confidence}
+            </span>
+            <span className="chip bg-ink-100 text-ink-700">status: {claim.status}</span>
+            {listing.claimStatus && listing.claimStatus !== 'unclaimed' && (
+              <span className="chip bg-cream-100 text-ink-700">
+                listing: {listing.claimStatus}
+              </span>
+            )}
+          </div>
+
+          {claim.confidenceReason && (
+            <p className="text-xs text-ink-500 mt-2 italic">
+              Why this confidence: {claim.confidenceReason}
+            </p>
+          )}
+          {claim.proofMessage && (
+            <div className="mt-2 rounded-xl bg-cream-100 border border-cream-300 p-2 text-xs">
+              <div className="text-[10px] uppercase tracking-wide text-ink-500 mb-1">
+                Proof message from manager
+              </div>
+              <p className="whitespace-pre-wrap break-words">{claim.proofMessage}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col sm:flex-row gap-2">
+          <button
+            onClick={() =>
+              run(
+                'Approve',
+                () => api.patch(`/admin/manager-claims/${claim._id}/approve`),
+                'Manager claim approved — listing is now claimed.'
+              )
+            }
+            className="btn-sky text-xs"
+          >
+            Approve
+          </button>
+          <button
+            onClick={() => {
+              // Allow the admin to leave a short rejection note that the
+              // manager sees on their dashboard. An empty note is fine.
+              const note =
+                typeof window !== 'undefined'
+                  ? window.prompt(
+                      'Optional reason (shown to the manager):',
+                      ''
+                    )
+                  : '';
+              if (note === null) return; // cancelled
+              run(
+                'Reject',
+                () =>
+                  api.patch(`/admin/manager-claims/${claim._id}/reject`, {
+                    adminNote: note || '',
+                  }),
+                'Manager claim rejected.'
+              );
+            }}
+            className="btn-ghost text-xs text-red-600"
+          >
+            Reject
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Detail({ label, value, mono = false }) {
+  if (!value) return null;
+  return (
+    <div>
+      <span className="text-ink-500">{label}: </span>
+      <span className={mono ? 'font-mono' : ''}>{value}</span>
     </div>
   );
 }

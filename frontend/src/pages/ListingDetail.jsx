@@ -10,6 +10,7 @@ import SubleaseCard from '../components/SubleaseCard.jsx';
 import ExpenseCalculator from '../components/ExpenseCalculator.jsx';
 import CommuteTimes from '../components/CommuteTimes.jsx';
 import { ListingBadge, ListingTrustNote, UserBadge } from '../components/Badges.jsx';
+import ListingClaimBadge from '../components/ListingClaimBadge.jsx';
 import { ListingImage } from '../components/ImagePreviewInput.jsx';
 import ReportButton from '../components/ReportButton.jsx';
 import SafetyNotice from '../components/SafetyNotice.jsx';
@@ -84,7 +85,7 @@ export default function ListingDetailPage() {
 
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <ListingBadge listing={listing} size="lg" />
+            <ListingClaimBadge listing={listing} />
           </div>
           <div className="flex flex-wrap items-baseline gap-3 mt-2">
             <h1 className="text-2xl sm:text-3xl font-semibold">{listing.name}</h1>

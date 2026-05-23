@@ -6,6 +6,7 @@ const Listing = require('./models/Listing');
 const Sublease = require('./models/Sublease');
 const Review = require('./models/Review');
 const Conversation = require('./models/Conversation');
+const ManagerClaim = require('./models/ManagerClaim');
 
 // Davis-area coordinates (UC Davis main quad ~ 38.5382, -121.7617)
 const DAVIS_CENTER = { lat: 38.5449, lng: -121.7405 };
@@ -322,6 +323,7 @@ async function seedDatabase() {
     Sublease.deleteMany({}),
     Review.deleteMany({}),
     Conversation.deleteMany({}),
+    ManagerClaim.deleteMany({}),
   ]);
 
   console.log('[seed] creating users');
@@ -344,6 +346,9 @@ async function seedDatabase() {
     emailVerified: true,
     company: 'Almondwood Apartments',
     managerStatus: 'approved',
+    workEmail: 'manager@almondwood.com',
+    managerDomain: 'almondwood.com',
+    managerVerifiedAt: new Date(),
   });
 
   const admin = await User.create({
@@ -379,11 +384,47 @@ async function seedDatabase() {
 
   console.log('[seed] creating listings');
   const listings = await Listing.insertMany(LISTINGS);
-  // Attach manager to Almondwood
+  // Attach manager to Almondwood — set all claim fields consistently so the
+  // public listing page, manager dashboard, and admin dashboard all agree
+  // about its state. We also create the corresponding approved
+  // ManagerClaim record so the audit trail isn't fictional.
   const almondwood = listings.find((l) => l.name === 'Almondwood Apartments');
   almondwood.manager = manager._id;
   almondwood.claimable = false;
+  almondwood.claimedByManager = true;
+  almondwood.claimedBy = manager._id;
+  almondwood.claimStatus = 'claimed';
+  almondwood.managerVerified = true;
+  almondwood.officialManagerDomain = 'almondwood.com';
+  almondwood.verificationStatus = 'claimed';
   await almondwood.save();
+
+  // Mirror the listing relationship on the manager so /manager dashboard
+  // and requireVerifiedManagerOfListing both see it.
+  manager.verifiedManagerFor = [almondwood._id];
+  manager.claimedListings = [almondwood._id];
+  await manager.save();
+
+  // Audit record for the approval. This matters because the admin UI
+  // ("Pending manager claims (N)") only counts ManagerClaim docs — if we
+  // didn't create one here, a fresh reseed would briefly look as if the
+  // manager never actually claimed the listing.
+  await ManagerClaim.create({
+    manager: manager._id,
+    listing: almondwood._id,
+    propertyName: 'Almondwood Apartments',
+    workEmail: 'manager@almondwood.com',
+    emailDomain: 'almondwood.com',
+    companyWebsite: 'https://almondwood.com',
+    websiteDomain: 'almondwood.com',
+    phoneNumber: '(530) 753-2112',
+    roleTitle: 'Property Manager',
+    confidence: 'high',
+    confidenceReason: 'Work email domain matches the property website domain.',
+    status: 'approved',
+    reviewedBy: admin._id,
+    reviewedAt: new Date(),
+  });
 
   console.log('[seed] creating subleases');
   await Sublease.insertMany([

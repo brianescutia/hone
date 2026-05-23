@@ -5,7 +5,15 @@
 //   - claimedByManager only                → "Claimed by Property"
 //   - claimStatus = 'pending'              → "Claim pending review"
 //   - sourceType = 'external_import'       → "External listing — not verified by hone"
+//   - manager set OR sourceType='manager_posted' → "Manager-posted"
 //   - default (unclaimed)                  → "Unclaimed listing"
+//
+// Note on the "Manager-posted" case: this is for legacy seeded listings
+// whose `manager` field is set without a full ManagerClaim record yet, and
+// for listings a manager creates from scratch via /manager. It is
+// deliberately weaker than "Claimed by Property" — we don't want a
+// listing to look "verified" until the new ManagerClaim flow has been
+// admin-approved.
 //
 // Usage:
 //   <ListingClaimBadge listing={listing} />
@@ -41,6 +49,14 @@ export default function ListingClaimBadge({ listing, className = '' }) {
     return (
       <span className={`chip bg-cream-200 ${className}`} title="A manager has submitted a claim for this listing. An admin is reviewing it.">
         Claim pending review
+      </span>
+    );
+  }
+
+  if (listing.manager || listing.sourceType === 'manager_posted') {
+    return (
+      <span className={`chip bg-sky-200 ${className}`} title="Posted by a property manager. Not yet verified through hone's claim flow.">
+        Manager-posted
       </span>
     );
   }
