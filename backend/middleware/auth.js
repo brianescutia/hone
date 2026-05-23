@@ -9,6 +9,9 @@ async function requireAuth(req, res, next) {
 
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(payload.id).select('-passwordHash');
+    // User not found = stale token (referenced ID was deleted, e.g. after
+    // a DB reseed). Return 401 so the frontend's global 401 handler can
+    // clear localStorage and bounce to /login.
     if (!user) return res.status(401).json({ error: 'User not found' });
     if (user.suspended)
       return res.status(403).json({ error: 'Account suspended' });
@@ -16,6 +19,7 @@ async function requireAuth(req, res, next) {
     req.user = user;
     next();
   } catch (err) {
+    // jwt.verify throws on invalid signature, malformed token, or expiry.
     res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
@@ -49,7 +53,7 @@ function requireVerifiedStudent(req, res, next) {
   if (req.user.role !== 'student' || !req.user.studentVerified)
     return res.status(403).json({
       error:
-        'Verified UC Davis student required. Sign up with an @ucdavis.edu email and click your verification link.',
+        'Only verified UC Davis students can do that. Sign in with your @ucdavis.edu Google account to verify.',
     });
   next();
 }

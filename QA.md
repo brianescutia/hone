@@ -69,3 +69,55 @@ cd ../frontend
 npm install
 npm run build
 ```
+
+## 11. Auth persistence (added after Google-login null-user fix)
+
+### 11a. Storage contains both keys after Google login
+- [ ] Sign in with an `@ucdavis.edu` Google account.
+- [ ] Open DevTools → Application → Local Storage → `https://hone-olive.vercel.app`.
+- [ ] `hone_token` is a JWT (three base64 segments joined by `.`).
+- [ ] `hone_user` is a JSON object containing at least `id`, `email`, `role`, `studentVerified: true`.
+- [ ] Same after email/password login. Same after register.
+
+### 11b. Refresh keeps the user logged in
+- [ ] After login, hard-refresh (Cmd-Shift-R / Ctrl-Shift-R). Dashboard reloads with the same user — no "logged out" flash.
+- [ ] DevTools → Network shows one `GET /api/auth/me` returning 200. Response body has no `passwordHash`.
+
+### 11c. Verified student can post a sublease
+- [ ] As a verified student, fill out `/subleases/new` and submit.
+- [ ] `POST /api/subleases` returns 201. Toast: "Your sublease is pending review."
+- [ ] `Authorization: Bearer <hone_token>` was present on the request.
+
+### 11d. Unverified user gets a clean 403
+- [ ] Sign up with a non-Davis email/password (or sign in via Google with a Gmail account).
+- [ ] Attempt `POST /api/subleases` (either via the form or via curl with their token).
+- [ ] Server returns 403. Frontend shows: "Only verified UC Davis students can post subleases."
+- [ ] User stays logged in (not bounced to /login).
+
+### 11e. Stale-token recovery
+This simulates what happens when JWT_SECRET rotates or the DB is reseeded.
+
+- [ ] Open DevTools → Application → Local Storage. Confirm both `hone_token` and `hone_user` are set.
+- [ ] In the Console, run: `localStorage.setItem('hone_token', 'eyJ0eXAiOi.broken.token')`
+- [ ] Reload the page.
+- [ ] Expected: toast "Please sign in again." → redirect to `/login`. Local storage no longer contains `hone_token` or `hone_user`.
+
+Repeat with a token that's valid but for a deleted user (e.g., issued before a `seed.js` run):
+- [ ] `requireAuth` middleware sees `User.findById(payload.id) === null` and returns 401.
+- [ ] Global 401 handler in `api/client.js` fires the registered callback.
+- [ ] `AuthContext` clears `hone_token` + `hone_user`, toasts, navigates to `/login`.
+
+### 11f. Manual recovery still works
+- [ ] In Console: `localStorage.clear()` → reload → user is logged out cleanly (no console errors, no spinner).
+- [ ] Log back in via Google → both keys are restored.
+
+## 12. /auth/me endpoint contract
+```bash
+TOKEN="..."  # paste from localStorage
+curl -i https://hone-production-6f2e.up.railway.app/api/auth/me                                # → 401
+curl -i -H "Authorization: Bearer bogus" https://hone-production-6f2e.up.railway.app/api/auth/me   # → 401
+curl -i -H "Authorization: Bearer $TOKEN" https://hone-production-6f2e.up.railway.app/api/auth/me  # → 200 { "user": {...} }
+```
+- [ ] 200 response body has `user.id`, `user.email`, `user.role`, `user.studentVerified`.
+- [ ] 200 response body does NOT contain `passwordHash`, `googleId`, or `emailVerifyTokenHash`.
+

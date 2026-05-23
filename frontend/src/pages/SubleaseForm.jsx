@@ -118,6 +118,16 @@ export default function SubleaseFormPage() {
       }
       navigate('/dashboard');
     } catch (err) {
+      // 401 = stale or missing token. The global unauthorized handler in
+      // AuthContext already cleared localStorage and is navigating to
+      // /login, so we don't need to show our own toast here.
+      if (err.status === 401) return;
+      // 403 = logged in but not a verified UC Davis student. Show the
+      // canonical message rather than the server's full sentence.
+      if (err.status === 403) {
+        toast.error('Only verified UC Davis students can post subleases.');
+        return;
+      }
       toast.error(err.message);
     } finally {
       setSubmitting(false);
