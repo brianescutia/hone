@@ -15,6 +15,30 @@ import { ListingImage } from '../components/ImagePreviewInput.jsx';
 import ReportButton from '../components/ReportButton.jsx';
 import SafetyNotice from '../components/SafetyNotice.jsx';
 
+// Mirror of ListingCard's formatPrice, kept local to avoid a cross-page
+// import. Returns null when we have nothing meaningful to show, so the
+// caller can render a "contact for pricing" UI instead of "$0".
+function formatPriceRange(min, max) {
+  const hasMin = typeof min === 'number' && min > 0;
+  const hasMax = typeof max === 'number' && max > 0;
+  if (!hasMin && !hasMax) return null;
+  if (hasMin && hasMax && min !== max) {
+    return `$${min.toLocaleString()} – $${max.toLocaleString()}`;
+  }
+  return `$${(hasMin ? min : max).toLocaleString()}+`;
+}
+
+// Same pattern as ListingCard.formatBedBath — bootstrap data can ship
+// without bed/bath counts, so don't render "undefined bd · undefined ba".
+function formatBedBath(min, max, unit) {
+  const hasMin = typeof min === 'number';
+  const hasMax = typeof max === 'number';
+  if (!hasMin && !hasMax) return null;
+  if (!hasMin) return `${max} ${unit}`;
+  if (!hasMax || min === max) return `${min} ${unit}`;
+  return `${min}–${max} ${unit}`;
+}
+
 export default function ListingDetailPage() {
   const { id } = useParams();
   const { user } = useAuth();
@@ -72,6 +96,14 @@ export default function ListingDetailPage() {
   const visiblePlans =
     activePlan === 'all' ? plans : plans.filter((p) => p.bedrooms === Number(activePlan));
 
+  // Pre-compute once for the SummaryBox so the JSX stays readable.
+  const bedBathSummary = [
+    formatBedBath(listing.bedroomsMin, listing.bedroomsMax, 'bd'),
+    formatBedBath(listing.bathroomsMin, listing.bathroomsMax, 'ba'),
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
     <div className="max-w-6xl mx-auto p-4 sm:p-6 space-y-8">
       {/* Top — gallery + summary */}
@@ -92,13 +124,22 @@ export default function ListingDetailPage() {
             <Stars value={listing.rating} size="lg" showNumber />
           </div>
           <p className="text-ink-500 mt-1">{listing.address}</p>
-          <p className="text-lg mt-2">
-            <span className="font-semibold">${listing.priceMin.toLocaleString()}</span>
-            <span className="text-ink-500"> /month</span>
-            <span className="text-xs text-ink-500 ml-2">
-              lowest price (per total apartment)
-            </span>
-          </p>
+          {(() => {
+            const range = formatPriceRange(listing.priceMin, listing.priceMax);
+            return range ? (
+              <p className="text-lg mt-2">
+                <span className="font-semibold">{range}</span>
+                <span className="text-ink-500"> /month</span>
+                <span className="text-xs text-ink-500 ml-2">
+                  lowest price (per total apartment)
+                </span>
+              </p>
+            ) : (
+              <p className="text-lg mt-2 text-ink-700 italic">
+                Contact management for pricing
+              </p>
+            );
+          })()}
           <div className="text-sm text-ink-700 mt-1 space-y-0.5">
             {listing.contactPhone && <div>Phone: {listing.contactPhone}</div>}
             {listing.contactEmail && <div>Email: {listing.contactEmail}</div>}
@@ -108,14 +149,10 @@ export default function ListingDetailPage() {
 
           <div className="grid grid-cols-3 gap-2 mt-4">
             <SummaryBox title="Price / month">
-              ${listing.priceMin.toLocaleString()}
-              {listing.priceMax > listing.priceMin && ` – $${listing.priceMax.toLocaleString()}`}
+              {formatPriceRange(listing.priceMin, listing.priceMax) || 'Contact for pricing'}
             </SummaryBox>
             <SummaryBox title="Bed & bath">
-              {listing.bedroomsMin}
-              {listing.bedroomsMax !== listing.bedroomsMin && `–${listing.bedroomsMax}`} bd ·{' '}
-              {listing.bathroomsMin}
-              {listing.bathroomsMax !== listing.bathroomsMin && `–${listing.bathroomsMax}`} ba
+              {bedBathSummary || '—'}
             </SummaryBox>
             <SummaryBox title="Key amenities">
               {(listing.keyAmenities || []).slice(0, 2).join(', ') || '—'}
@@ -202,8 +239,12 @@ export default function ListingDetailPage() {
           </p>
           <div className="space-y-2">
             {subleases.length === 0 && (
-              <div className="bg-white rounded-xl p-4 text-sm text-ink-500 text-center">
-                No subleases posted yet for this listing.
+              <div className="bg-white rounded-xl p-6 text-center">
+                <div className="text-3xl mb-2">🛌</div>
+                <p className="text-sm font-medium text-ink-900">No subleases posted yet</p>
+                <p className="text-xs text-ink-500 mt-1">
+                  Verified UC Davis students can post a sublease for this listing from their dashboard.
+                </p>
               </div>
             )}
             {subleases.map((s) => (
@@ -256,40 +297,56 @@ export default function ListingDetailPage() {
               {visiblePlans.length === 0 && (
                 <p className="text-sm text-ink-500">No floor plans match that filter.</p>
               )}
-              {visiblePlans.map((p, i) => (
-                <div key={i} className="bg-cream-50 rounded-xl p-3 sm:p-4 flex gap-4">
-                  {p.imageUrl ? (
-                    <ListingImage
-                      src={p.imageUrl}
-                      alt={p.name}
-                      className="w-32 h-32 object-cover rounded-lg bg-white"
-                    />
-                  ) : (
-                    <div className="w-32 h-32 rounded-lg bg-white grid place-items-center text-ink-500 text-xs">
-                      Floor plan
-                    </div>
-                  )}
-                  <div className="flex-1 text-sm">
-                    <div className="font-semibold">{p.name}</div>
-                    <div className="text-ink-700 mt-1">
-                      Rental rate: ${p.price?.toLocaleString()}/mo
-                    </div>
-                    <div className="text-ink-500 text-xs mt-0.5">
-                      Area: {p.sqft} sq.ft · Security deposit: ${p.deposit?.toLocaleString()}
-                    </div>
-                    {p.specialAvailability && (
-                      <div className="mt-1 text-xs">
-                        <strong>Special availability:</strong> {p.specialAvailability}
+              {visiblePlans.map((p, i) => {
+                // Defend against floor plans missing one or more numeric fields.
+                // Bootstrap data sometimes only has the name + bedroom count.
+                const hasPrice = typeof p.price === 'number' && p.price > 0;
+                const hasSqft = typeof p.sqft === 'number' && p.sqft > 0;
+                const hasDeposit = typeof p.deposit === 'number' && p.deposit > 0;
+                const detailParts = [
+                  hasSqft && `Area: ${p.sqft} sq.ft`,
+                  hasDeposit && `Security deposit: $${p.deposit.toLocaleString()}`,
+                ].filter(Boolean);
+
+                return (
+                  <div key={i} className="bg-cream-50 rounded-xl p-3 sm:p-4 flex gap-4">
+                    {p.imageUrl ? (
+                      <ListingImage
+                        src={p.imageUrl}
+                        alt={p.name}
+                        className="w-32 h-32 object-cover rounded-lg bg-white"
+                      />
+                    ) : (
+                      <div className="w-32 h-32 rounded-lg bg-white grid place-items-center text-ink-500 text-xs">
+                        Floor plan
                       </div>
                     )}
-                    {listing.contactPhone && (
-                      <div className="text-xs text-ink-500 mt-1">
-                        Call for pricing and move-in info: {listing.contactPhone}
+                    <div className="flex-1 text-sm">
+                      <div className="font-semibold">{p.name || 'Floor plan'}</div>
+                      <div className="text-ink-700 mt-1">
+                        {hasPrice
+                          ? `Rental rate: $${p.price.toLocaleString()}/mo`
+                          : <span className="italic text-ink-500">Contact for rental rate</span>}
                       </div>
-                    )}
+                      {detailParts.length > 0 && (
+                        <div className="text-ink-500 text-xs mt-0.5">
+                          {detailParts.join(' · ')}
+                        </div>
+                      )}
+                      {p.specialAvailability && (
+                        <div className="mt-1 text-xs">
+                          <strong>Special availability:</strong> {p.specialAvailability}
+                        </div>
+                      )}
+                      {listing.contactPhone && (
+                        <div className="text-xs text-ink-500 mt-1">
+                          Call for pricing and move-in info: {listing.contactPhone}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </section>
@@ -364,7 +421,13 @@ export default function ListingDetailPage() {
         )}
         <div className="space-y-3">
           {reviews.length === 0 && (
-            <p className="text-sm text-ink-500">No reviews yet — be the first.</p>
+            <div className="bg-cream-50 border border-cream-200 rounded-2xl p-6 text-center">
+              <div className="text-3xl mb-2">⭐</div>
+              <p className="text-sm font-medium text-ink-900">No reviews yet</p>
+              <p className="text-xs text-ink-500 mt-1">
+                Lived here? Sign in with your UC Davis Google account to be the first to leave a review.
+              </p>
+            </div>
           )}
           {reviews.map((r) => (
             <ReviewCardWithReport key={r._id} review={r} />
@@ -386,20 +449,25 @@ export default function ListingDetailPage() {
         <section>
           <h2 className="section-cap mb-3">Similar listings</h2>
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {similar.map((s) => (
-              <Link
-                key={s._id}
-                to={`/listings/${s._id}`}
-                className="card overflow-hidden hover:shadow-md transition"
-              >
-                <ListingImage src={s.photos?.[0]} alt={s.name} className="w-full h-32 object-cover" />
-                <div className="p-3">
-                  <div className="font-medium">{s.name}</div>
-                  <div className="text-xs text-ink-500">{s.address}</div>
-                  <div className="text-sm mt-1">${s.priceMin.toLocaleString()}+/mo</div>
-                </div>
-              </Link>
-            ))}
+            {similar.map((s) => {
+              const priceLabel = formatPriceRange(s.priceMin, s.priceMax);
+              return (
+                <Link
+                  key={s._id}
+                  to={`/listings/${s._id}`}
+                  className="card overflow-hidden hover:shadow-md transition"
+                >
+                  <ListingImage src={s.photos?.[0]} alt={s.name} className="w-full h-32 object-cover" />
+                  <div className="p-3">
+                    <div className="font-medium">{s.name}</div>
+                    <div className="text-xs text-ink-500">{s.address}</div>
+                    <div className={priceLabel ? 'text-sm mt-1' : 'text-sm mt-1 italic text-ink-500'}>
+                      {priceLabel ? `${priceLabel}/mo` : 'Contact for pricing'}
+                    </div>
+                  </div>
+                </Link>
+              );
+            })}
           </div>
         </section>
       )}
