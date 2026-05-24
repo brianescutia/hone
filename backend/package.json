@@ -9,6 +9,7 @@
     "start": "node server.js",
     "seed": "node seed.js",
     "create-admin": "node scripts/createAdmin.js",
+    "bootstrap:davis": "node scripts/bootstrapDavisApartments.js",
     "test": "node --test --test-timeout=60000 test/*.test.js"
   },
   "dependencies": {

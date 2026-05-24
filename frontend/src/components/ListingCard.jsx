@@ -6,6 +6,19 @@ import { api } from '../api/client.js';
 import { ListingBadge } from './Badges.jsx';
 import { ListingImage } from './ImagePreviewInput.jsx';
 
+function formatPrice(min, max) {
+  const hasMin = typeof min === 'number' && min > 0;
+  const hasMax = typeof max === 'number' && max > 0;
+
+  if (!hasMin && !hasMax) return 'Contact for pricing';
+
+  if (hasMin && hasMax && min !== max) {
+    return `$${min.toLocaleString()} – $${max.toLocaleString()}/mo`;
+  }
+
+  return `$${(hasMin ? min : max).toLocaleString()}+/mo`;
+}
+
 function HeartIcon({ filled, className = 'w-5 h-5' }) {
   return (
     <svg
@@ -49,9 +62,8 @@ export default function ListingCard({ listing, highlighted, onHover, onLeave }) 
       to={`/listings/${listing._id}`}
       onMouseEnter={onHover}
       onMouseLeave={onLeave}
-      className={`block card overflow-hidden hover:shadow-md transition ${
-        highlighted ? 'ring-2 ring-sage-400' : ''
-      }`}
+      className={`block card overflow-hidden hover:shadow-md transition ${highlighted ? 'ring-2 ring-sage-400' : ''
+        }`}
     >
       <div className="flex gap-3">
         <div className="w-40 h-32 sm:w-44 sm:h-36 shrink-0 bg-ink-100 overflow-hidden">
@@ -69,11 +81,7 @@ export default function ListingCard({ listing, highlighted, onHover, onLeave }) 
               </h3>
               <p className="text-xs text-ink-500 truncate">{listing.address}</p>
               <p className="text-sm font-medium mt-1">
-                ${listing.priceMin.toLocaleString()}
-                {listing.priceMax > listing.priceMin && (
-                  <span className="text-ink-500"> – ${listing.priceMax.toLocaleString()}</span>
-                )}{' '}
-                <span className="text-ink-500 font-normal">/month</span>
+                {formatPrice(listing.priceMin, listing.priceMax)}
               </p>
             </div>
             <button
