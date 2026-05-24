@@ -3,6 +3,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 let server;
+let teardown;
+
 let base;
 const studentToken = { val: null };
 const adminToken = { val: null };
@@ -27,11 +29,13 @@ async function getJSON(path, token) {
 test.before(async () => {
   process.env.NODE_ENV = 'test';
   process.env.JWT_SECRET = 'a'.repeat(48);
-  delete process.env.MONGO_URI;
+  process.env.MONGO_URI = '';
 
   try {
     const { start } = require('../server');
-    server = await start();
+    const started = await start();
+    server = started.server;
+    teardown = started.teardown;
   } catch (err) {
     console.error('\n[test] Could not start server:', err.message, '\n');
     process.exit(0);
@@ -42,7 +46,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (server) await new Promise((r) => server.close(r));
+  if (teardown) await teardown();
 });
 
 test('GET /health returns ok', async () => {

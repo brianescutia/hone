@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-
+const mongoose = require('mongoose');
 const { connectDB } = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/error');
 
@@ -90,7 +90,7 @@ function corsOptions() {
 
 async function start() {
   ensureSafeConfig();
-  await connectDB();
+  const { memServer } = await connectDB();
 
   // Auto-seed in-memory DB for local dev.
   // In production with MONGO_URI set, seeding is gated by SEED_DEMO_DATA=true
@@ -101,7 +101,7 @@ async function start() {
   } else if (process.env.SEED_DEMO_DATA === 'true') {
     console.warn(
       '[seed] SEED_DEMO_DATA=true — seeding production-style DB with demo data. ' +
-        'Turn this OFF before public launch.'
+      'Turn this OFF before public launch.'
     );
     const { seedDatabase } = require('./seedData');
     await seedDatabase();
@@ -153,12 +153,32 @@ async function start() {
     );
     console.log(
       `[server] Feature flags: ` +
-        `AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES=${process.env.AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES || 'false'}, ` +
-        `MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES=${process.env.MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES || 'false'}`
+      `AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES=${process.env.AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES || 'false'}, ` +
+      `MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES=${process.env.MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES || 'false'}`
     );
   });
 
-  return server;
+  async function teardown() {
+    try {
+      if (server && server.listening) {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    } catch (_) { }
+
+    try {
+      if (mongoose.connection && mongoose.connection.readyState !== 0) {
+        await mongoose.disconnect();
+      }
+    } catch (_) { }
+
+    try {
+      if (memServer && typeof memServer.stop === 'function') {
+        await memServer.stop();
+      }
+    } catch (_) { }
+  }
+
+  return { server, teardown };
 }
 
 if (require.main === module) {

@@ -25,6 +25,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 let server;
+let teardown;
+
 let base;
 
 const tokens = {
@@ -75,11 +77,13 @@ test.before(async () => {
   // sublease one off in the dedicated test.
   process.env.AUTO_APPROVE_VERIFIED_STUDENT_SUBLEASES = 'true';
   process.env.MANAGER_AUTO_APPROVE_CLAIMED_LISTING_UPDATES = 'true';
-  delete process.env.MONGO_URI;
+  process.env.MONGO_URI = '';
 
   try {
     const { start } = require('../server');
-    server = await start();
+    const started = await start();
+    server = started.server;
+    teardown = started.teardown;
   } catch (err) {
     console.error('\n[managerClaims.test] Could not start server:', err.message, '\n');
     process.exit(0);
@@ -94,9 +98,8 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (server) await new Promise((r) => server.close(r));
+  if (teardown) await teardown();
 });
-
 // ---------------------------------------------------------------------------
 // Helpers — lookups against the live API (avoids importing mongoose models
 // into the test, which would cause connection clashes with the running server).

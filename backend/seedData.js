@@ -399,6 +399,37 @@ async function seedDatabase() {
   almondwood.verificationStatus = 'claimed';
   await almondwood.save();
 
+  // Belt-and-suspenders: ensure Almondwood remains fully claimed in the DB
+  // even if insertMany/save/default behavior changes across Mongoose versions.
+  await Listing.updateOne(
+    { name: 'Almondwood Apartments' },
+    {
+      $set: {
+        manager: manager._id,
+        claimable: false,
+        claimedByManager: true,
+        claimedBy: manager._id,
+        claimStatus: 'claimed',
+        managerVerified: true,
+        officialManagerDomain: 'almondwood.com',
+        verificationStatus: 'claimed',
+      },
+    }
+  );
+
+  // Ensure the seeded external-import listing stays hidden from public listings
+  // and appears in the admin pending-review queue.
+  await Listing.updateOne(
+    { name: 'Greens at Cordova' },
+    {
+      $set: {
+        sourceType: 'external_import',
+        verificationStatus: 'pending_review',
+        lastImportedAt: new Date(),
+      },
+    }
+  );
+
   // Mirror the listing relationship on the manager so /manager dashboard
   // and requireVerifiedManagerOfListing both see it.
   manager.verifiedManagerFor = [almondwood._id];

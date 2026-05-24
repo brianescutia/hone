@@ -106,4 +106,4 @@ const ListingSchema = new mongoose.Schema(
 ListingSchema.index({ 'location.lat': 1, 'location.lng': 1 });
 ListingSchema.index({ name: 'text', address: 'text', description: 'text' });
 
-module.exports = mongoose.model('Listing', ListingSchema);
+module.exports = mongoose.models.Listing || mongoose.model('Listing', ListingSchema);
