@@ -52,6 +52,7 @@ const SAFE_FIELDS_TO_REFRESH_ON_UNCLAIMED = [
     'sourceUrl',
     'contactEmail',
     'contactPhone',
+    'photos'
 ];
 
 function pickSafeFields(src) {
