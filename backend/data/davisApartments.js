@@ -504,6 +504,74 @@ const DAVIS_APARTMENTS = [
   },
 ];
 
+const PHOTO_OVERRIDES = {
+  'Almondwood Apartments': [
+    'https://www.davisapartmentsforrent.com/almondwood/wp-content/uploads/sites/3/2022/01/almondwood-two-bedroom-deluxe-apartment-010.jpg',
+  ],
+  'The Colleges at La Rue': [
+    'https://cdngeneralcf.rentcafe.com/dmslivecafe/3/111655/UHS%20Web%202025%20-%206%20of%2012.jpeg?crop=(0,0,300,225)&cropxunits=300&cropyunits=225&quality=85&width=480&mode=max',
+  ],
+  'Tanglewood Apartments': [
+    'https://res.cloudinary.com/g5-assets-cld/image/upload/x_142,y_2,h_753,w_1076,c_crop/q_auto,f_auto,fl_lossy,g_center,h_698,w_998/g5/g5-c-il8mwp5u-fpi-management/g5-cl-1n8mid7c30-fpi-management-davis-ca/uploads/Living-room-2_22_l9goqs_wiaoga.jpg',
+  ],
+  'Sycamore Lane Apartments': [
+    'https://images.squarespace-cdn.com/content/v1/6071e4db30c73a5ec2ec9d26/51fe5407-8249-4b3d-82cd-5c5cae61d8ea/DSC02828-2_Final.jpg?format=1000w',
+  ],
+  'Fountain Circle Townhomes': [
+    'https://www.davisapartmentsforrent.com/fountaincircle/wp-content/uploads/sites/4/2025/10/fountain-circle-2br-bedroom-1-1.jpg',
+  ],
+  'Aggie Square Apartments': [
+    'https://www.davisapartmentsforrent.com/aggiesquare/wp-content/uploads/sites/2/2025/11/aggie-square-apartments-living-room-005.jpg',
+  ],
+  'University Court': [
+    'https://lirp.cdn-website.com/663ee385/dms3rep/multi/opt/gr138-1920w.png',
+  ],
+  'Pinecrest Apartments': [
+    'https://resource.rentcafe.com/image/upload/q_auto,f_auto,c_limit,w_1200/s3/2/33215/pinecrest%202023%20pc27.jpg?RCStandardCampaignId_46479=570654&_yTrackUser=NDIxNjYyMzc2NiMxNDk1NDQwOTIz-doHJFs2PFPI%253d&_yTrackVisit=Njg0NTU5NjY0MCMzOTY3OTU2OTg%253d-SnrEkrtZESw%253d&_yTrackReqDT=30030520262605',
+  ],
+  'Anderson Place': [
+    'https://cdngeneralcf.rentcafe.com/dmslivecafe/3/111649/Rentcafe%20Gallery%20%E2%80%93%201.jpg?&quality=85&width=480&mode=max',
+  ],
+  'Arlington Farm': [
+    'https://cdngeneralcf.rentcafe.com/dmslivecafe/3/111650/Property%20Pic%201.jpg?crop=(0,0,300,200)&cropxunits=300&cropyunits=200&quality=85&width=480&mode=max',
+  ],
+  'Sorrento Apartments': [
+    'https://g5-assets-cld-res.cloudinary.com/image/upload/q_auto,f_auto,c_fill,g_center,h_665,w_998/v1714427807/g5/g5-c-il8mwp5u-fpi-management/g5-cl-1orbq1bxvp-fpi-management-davis-ca/uploads/psdavis_dsc5927_pghwi9.jpg',
+  ],
+  'Sundance Apartments': [
+    'https://resource.rentcafe.com/image/upload/q_auto,f_auto,c_limit,w_1200/s3/2/5334/7.jpg?_yTrackUser=NDIxNjYyMDgwNyM3Mzg3MjY3NQ%253d%253d-2cgv3%252bX1W5g%253d&_yTrackVisit=Njg0NTU5Mjg2MCMxNzQ1MzYxNTY5-nHeoSPb7mOQ%253d&_yTrackReqDT=45000520262605',
+  ],
+  'Renaissance Park': [
+    'https://resource.rentcafe.com/image/upload/q_auto,f_auto,c_limit,w_1920,dpr_2/s3/2/33215/living%20room%20photo%209.jpg',
+  ],
+  'Adobe at Evergreen': [
+    'https://cdngeneralcf.rentcafe.com/dmslivecafe/3/111648/3_111648_2437202.jpg?crop=(0,0,300,200)&cropxunits=300&cropyunits=200&quality=85&width=560&mode=max',
+  ],
+  'The Spoke': [
+    'https://cdn.prod.website-files.com/6983903d8d8583a3888d49bd/6983b16a5f90ee56f57799ea_J-St-006.webp',
+  ],
+  'Identity Davis': [
+    'https://www.identitydavis.com/images/gallery/gallery-apartments-1.webp',
+  ],
+  'Sol at West Village': [
+    'https://solatwestvillage.com/wp-content/uploads/2024/01/sol-at-west-village-gallery-units-1.jpg',
+  ],
+  'Axis at Davis': [
+    'https://cdn.prod.website-files.com/666885426f506180b91cac44/6949767305d06998aadb3d68_ModelFamilyRoom-p-3200.jpg',
+  ],
+  'Octave Apartments': [
+    'https://g5-assets-cld-res.cloudinary.com/image/upload/q_auto,f_auto,c_fill,g_center,h_665,w_998/v1778782792/g5/g5-c-il8mwp5u-fpi-management/g5-cl-1ogj1a9ef9-fpi-management-davis-ca/uploads/original-42304F23-7EA8-425C-811E-64DD19AA7FC6_2_powb6c.png',
+  ],
+};
+
+for (const apartment of DAVIS_APARTMENTS) {
+  if (
+    PHOTO_OVERRIDES[apartment.name] &&
+    (!Array.isArray(apartment.photos) || apartment.photos.length === 0)
+  ) {
+    apartment.photos = PHOTO_OVERRIDES[apartment.name];
+  }
+}
 module.exports = {
   DAVIS_APARTMENTS,
   // Stable lookup helpers — used by import dedup logic and by the
