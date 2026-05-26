@@ -9,6 +9,9 @@
     "start": "node server.js",
     "seed": "node seed.js",
     "create-admin": "node scripts/createAdmin.js",
+    "create-manager": "node scripts/createManager.js",
+    "audit-demo-users": "node scripts/auditDemoUsers.js",
+    "remove-demo-users": "CONFIRM_REMOVE_DEMO_USERS=true node scripts/auditDemoUsers.js",
     "bootstrap:davis": "node scripts/bootstrapDavisApartments.js",
     "test": "node --test --test-timeout=60000 test/*.test.js"
   },

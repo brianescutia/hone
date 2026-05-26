@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api/client.js';
 import { useToast } from '../context/ToastContext.jsx';
-import ImagePreviewInput from '../components/ImagePreviewInput.jsx';
+import PhotoUploader from '../components/PhotoUploader.jsx';
 import SafetyNotice from '../components/SafetyNotice.jsx';
 
 const EMPTY = {
@@ -118,12 +118,7 @@ export default function SubleaseFormPage() {
       }
       navigate('/dashboard');
     } catch (err) {
-      // 401 = stale or missing token. The global unauthorized handler in
-      // AuthContext already cleared localStorage and is navigating to
-      // /login, so we don't need to show our own toast here.
       if (err.status === 401) return;
-      // 403 = logged in but not a verified UC Davis student. Show the
-      // canonical message rather than the server's full sentence.
       if (err.status === 403) {
         toast.error('Only verified UC Davis students can post subleases.');
         return;
@@ -137,7 +132,7 @@ export default function SubleaseFormPage() {
   if (loading) return <div className="p-12 text-center text-ink-500">Loading…</div>;
 
   return (
-    <div className="max-w-2xl mx-auto p-4 sm:p-6">
+    <div className="max-w-2xl mx-auto p-4 sm:p-6 pb-24 sm:pb-6">
       <h1 className="section-cap mb-1">{isEdit ? 'Edit sublease' : 'Post a sublease'}</h1>
       {!isEdit && (
         <p className="text-sm text-ink-500 mb-4">
@@ -317,7 +312,7 @@ export default function SubleaseFormPage() {
         </Field>
 
         <Field label="Contact preference" error={errors.contactPreference}>
-          <div className="grid sm:grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {[
               ['in_app_message', 'In-app message'],
               ['email', 'Email'],
@@ -357,11 +352,13 @@ export default function SubleaseFormPage() {
           </Field>
         )}
 
-        <ImagePreviewInput
-          value={form.photos[0] || ''}
-          onChange={(v) => update('photos', v ? [v] : [])}
-          label="Photo (optional)"
-          hint="Paste a public image URL. We'll add real uploads in a future release."
+        <PhotoUploader
+          value={form.photos}
+          onChange={(urls) => update('photos', urls)}
+          max={6}
+          maxBytes={5 * 1024 * 1024}
+          label="Photos (optional)"
+          hint="Up to 6 photos, max 5 MB each. JPG, PNG, WEBP, or HEIC. Posting without photos is fine."
         />
 
         {isEdit && (
@@ -378,8 +375,9 @@ export default function SubleaseFormPage() {
           </Field>
         )}
 
-        <div className="flex gap-2 pt-2">
-          <button disabled={submitting} className="btn-primary">
+        {/* Sticky submit on mobile, inline on desktop. */}
+        <div className="sm:relative fixed bottom-0 left-0 right-0 bg-white sm:bg-transparent border-t sm:border-0 border-ink-100 p-3 sm:p-0 sm:pt-2 flex gap-2 z-30">
+          <button disabled={submitting} className="btn-primary flex-1 sm:flex-none">
             {submitting
               ? 'Saving…'
               : isEdit
