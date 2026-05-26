@@ -7,13 +7,20 @@ const { connectDB } = require('./config/db');
 const { notFound, errorHandler } = require('./middleware/error');
 
 function ensureSafeConfig() {
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 16) {
-    if (process.env.NODE_ENV === 'production') {
+  const MIN_PROD_SECRET_LEN = 48;
+
+  if (process.env.NODE_ENV === 'production') {
+    if (
+      !process.env.JWT_SECRET ||
+      process.env.JWT_SECRET.length < MIN_PROD_SECRET_LEN
+    ) {
       console.error(
-        '[fatal] JWT_SECRET must be set to a long random string in production.'
+        `[fatal] JWT_SECRET must be at least ${MIN_PROD_SECRET_LEN} characters in production. ` +
+        `Generate one with: node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
       );
       process.exit(1);
     }
+  } else if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 16) {
     process.env.JWT_SECRET =
       process.env.JWT_SECRET ||
       require('crypto').randomBytes(48).toString('hex');
@@ -23,16 +30,13 @@ function ensureSafeConfig() {
   }
 
   if (process.env.NODE_ENV === 'production' && !process.env.MONGO_URI) {
-    console.error(
-      '[fatal] MONGO_URI must be set in production. Refusing to fall back to in-memory MongoDB.'
-    );
+    console.error('[fatal] MONGO_URI must be set in production.');
     process.exit(1);
   }
 
   if (process.env.NODE_ENV === 'production' && !process.env.GOOGLE_CLIENT_ID) {
-    // Not fatal — admin/manager email/password still works — but warn loudly.
     console.warn(
-      '[warn] GOOGLE_CLIENT_ID is not set. Google sign-in (student verification) will be disabled.'
+      '[warn] GOOGLE_CLIENT_ID is not set. Google sign-in will be disabled.'
     );
   }
 }
@@ -99,10 +103,23 @@ async function start() {
     const { seedDatabase } = require('./seedData');
     await seedDatabase();
   } else if (process.env.SEED_DEMO_DATA === 'true') {
+    if (process.env.NODE_ENV === 'production') {
+      const User = require('./models/User');
+      const existingUsers = await User.countDocuments();
+
+      if (existingUsers > 0) {
+        console.error(
+          `[fatal] SEED_DEMO_DATA=true in production with ${existingUsers} existing users. ` +
+          'Refusing to wipe the database. Unset SEED_DEMO_DATA or use a fresh database.'
+        );
+        process.exit(1);
+      }
+    }
+
     console.warn(
-      '[seed] SEED_DEMO_DATA=true — seeding production-style DB with demo data. ' +
-      'Turn this OFF before public launch.'
+      '[seed] SEED_DEMO_DATA=true — seeding with demo data. Turn this OFF before public launch.'
     );
+
     const { seedDatabase } = require('./seedData');
     await seedDatabase();
   }
