@@ -47,6 +47,17 @@ export default function Navbar() {
 
         <div className="flex-1" />
 
+        <NavLink
+          to="/about"
+          className={({ isActive }) =>
+            `text-sm px-2 py-1.5 rounded-full hover:bg-white/40 ${
+              isActive ? 'text-ink-900 font-medium' : 'text-ink-700'
+            }`
+          }
+        >
+          about
+        </NavLink>
+
         {user ? (
           <>
             <Link to="/messages" aria-label="Messages" className="p-2 rounded-full hover:bg-white/40">
